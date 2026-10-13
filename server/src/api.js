@@ -31,6 +31,9 @@ import { payeeHtml, warrantyHtml } from './lib/templates.js';
 import { htmlToPdf, mergePdfs, closeBrowser } from './lib/pdf.js';
 import { englishName } from './lib/transliterate.js';
 import { storage } from './lib/storage.js';
+import { findByName, matchByName, nearNames, nameKeys } from './lib/names.js';
+import { parseLine, suggestSerial, usualLength } from './lib/smartPaste.js';
+import { parseInverter } from './lib/parsers.js';
 import { Batch } from './models.js';
 import path from 'node:path';
 
@@ -120,6 +123,11 @@ api.patch(
     if (typeof b.insuranceAttached === 'boolean') set.insuranceAttached = b.insuranceAttached;
     if (typeof b.manualInverterDatasheet === 'string') {
       set.manualInverterDatasheet = files.includes(b.manualInverterDatasheet) ? b.manualInverterDatasheet : '';
+    }
+    for (const [field, label] of [['inverterSerial', 'serial number'], ['applicationNumber', 'application number']]) {
+      if (!set[field]) continue;
+      const other = await Customer.findOne({ [field]: set[field], _id: { $ne: c._id } }, { name: 1 }).lean();
+      if (other) return res.status(409).json({ error: `This ${label} is already saved for ${other.name}` });
     }
     const updated = await Customer.findByIdAndUpdate(c._id, { $set: set }, { new: true }).lean();
     if (set.applicationNumber) await resolvePending(await customersForMatching());
@@ -261,7 +269,7 @@ api.post(
 
 api.get('/import/last', wrap(async (req, res) => res.json({ report: await getSetting('lastImport') })));
 
-// ---------- bulk paste: "mobile <tab> value" per line ----------
+// ---------- bulk paste: "mobile <tab> value" or "English name <tab> value" per line ----------
 const compact = (v) => v.toUpperCase().replace(/\s+/g, '');
 const BULK_FIELDS = { englishName: (v) => v, inverterSerial: compact, applicationNumber: compact };
 
@@ -271,33 +279,80 @@ api.post(
     const { field, text, apply } = req.body || {};
     if (!BULK_FIELDS[field]) return res.status(400).json({ error: 'Unknown field' });
 
-    const all = await Customer.find({}, { name: 1, sheet: 1, mobiles: 1, englishName: 1, inverterSerial: 1, applicationNumber: 1 }).lean();
+    const cfg = await loadDatasheetConfig();
+    const all = await Customer.find({}, { name: 1, sheet: 1, village: 1, mobile: 1, mobiles: 1, englishName: 1, inverterSerial: 1, applicationNumber: 1, inverterRaw: 1 }).lean();
     const byMobile = new Map();
-    for (const c of all) for (const m of c.mobiles || []) byMobile.set(m, [...(byMobile.get(m) || []), c]);
+    for (const c of all) {
+      for (const m of c.mobiles || []) byMobile.set(m, [...(byMobile.get(m) || []), c]);
+      c.keys = nameKeys(c.englishName || englishName(c.name));
+      c.solaryaan = parseInverter(c.inverterRaw, cfg.inverterBrands).brand === 'solaryaan';
+    }
+    // A serial number only belongs on a SOLARYAAN customer, which also narrows down same-name customers.
+    const namePool = field === 'inverterSerial' ? all.filter((c) => c.solaryaan) : all;
 
     const rows = [];
-    String(text || '')
-      .split(/\r?\n/)
-      .forEach((raw, i) => {
-        const line = toAscii(raw).trim();
-        if (!line) return;
-        // Pasted from Excel the columns are tab-separated; typed by hand, the first space splits them.
-        const cells = line.split(/[\t,;|]+/);
-        const [first, rest] = cells.length > 1 ? [cells[0], cells.slice(1).join(' ')] : [line.split(/\s+/)[0], line.replace(/^\S+\s*/, '')];
-        const allDigits = first.replace(/\D/g, '');
-        const digits = allDigits.length === 10 || (allDigits.length === 12 && allDigits.startsWith('91')) ? allDigits.slice(-10) : '';
-        const value = BULK_FIELDS[field](clean(rest));
-        const row = { line: i + 1, mobile: digits || first, value };
-        if (!digits) return rows.push({ ...row, result: 'bad', message: 'Line must start with a 10-digit mobile number' });
-        if (!value) return rows.push({ ...row, result: 'bad', message: 'No value after the mobile number' });
-        const hits = byMobile.get(digits) || [];
+    const lines = String(text || '').split(/\r?\n/);
+    // Most serial numbers have the same length; one that differs is probably a typing mistake.
+    const lengths = new Map();
+    lines.forEach((raw, i) => {
+      const line = toAscii(raw).trim();
+      if (!line) return;
+      // Pasted from Excel the columns are tab-separated; typed by hand, the last word is the value.
+      const cells = line.split(/[\t,;|]+/).map((s) => s.trim()).filter(Boolean);
+      const firstWord = line.split(/\s+/)[0];
+      const firstDigits = (cells.length > 1 ? cells[0] : firstWord).replace(/\D/g, '');
+      const mobile = firstDigits.length === 10 || (firstDigits.length === 12 && firstDigits.startsWith('91')) ? firstDigits.slice(-10) : '';
+
+      let who;
+      let rest;
+      if (mobile) {
+        who = mobile;
+        rest = cells.length > 1 ? cells.slice(1).join(' ') : line.replace(/^\S+\s*/, '');
+      } else if (cells.length > 1) {
+        who = cells[0];
+        rest = cells.slice(1).join(' ');
+      } else {
+        const parts = line.split(/\s+/);
+        rest = parts.pop();
+        who = parts.join(' ');
+      }
+      const value = BULK_FIELDS[field](clean(rest));
+      const row = { line: i + 1, mobile: who, value };
+      if (!who || !/[A-Za-z0-9]/.test(who)) return rows.push({ ...row, result: 'bad', message: 'Each line needs a mobile number or an English name, then the value' });
+      if (!value) return rows.push({ ...row, result: 'bad', message: 'No value on this line' });
+
+      let hits;
+      let how;
+      if (mobile) {
+        hits = byMobile.get(mobile) || [];
+        how = 'mobile number';
         if (!hits.length) return rows.push({ ...row, result: 'notFound', message: 'No customer with this mobile number' });
-        if (hits.length > 1) {
-          return rows.push({ ...row, result: 'ambiguous', message: `${hits.length} customers share this number – enter it on the customer page`, names: hits.map((h) => h.name) });
+      } else {
+        hits = findByName(who, namePool);
+        how = 'name';
+        if (!hits.length) {
+          const elsewhere = field === 'inverterSerial' && findByName(who, all).length;
+          return rows.push({ ...row, result: 'notFound', message: elsewhere ? 'A customer has this name, but their inverter is not SOLARYAAN' : 'No customer with this name. Use the mobile number, or type it on the customer page' });
         }
-        const c = hits[0];
-        rows.push({ ...row, id: String(c._id), name: c.name, old: c[field] || '', result: c[field] === value ? 'same' : 'ok' });
-      });
+      }
+      if (hits.length > 1) {
+        return rows.push({ ...row, result: 'ambiguous', message: `${hits.length} customers fit this ${how}. Type it on the customer page`, names: hits.map((h) => `${h.name} (${h.village || h.sheet})`) });
+      }
+      const c = hits[0];
+      lengths.set(value.length, (lengths.get(value.length) || 0) + 1);
+      rows.push({ ...row, id: String(c._id), name: c.name, village: c.village, how, old: c[field] || '', result: c[field] === value ? 'same' : 'ok' });
+    });
+
+    // Two lines for the same customer: neither is saved, a person must decide.
+    const perCustomer = new Map();
+    for (const r of rows) if (r.id) perCustomer.set(r.id, (perCustomer.get(r.id) || 0) + 1);
+    for (const r of rows) {
+      if (r.id && perCustomer.get(r.id) > 1) Object.assign(r, { result: 'ambiguous', message: 'Two lines here match the same customer. Check both names' });
+    }
+    if (field === 'inverterSerial' && lengths.size > 1) {
+      const usual = [...lengths.entries()].sort((a, b) => b[1] - a[1])[0][0];
+      for (const r of rows) if (r.result === 'ok' && r.value.length !== usual) r.warning = `This serial has ${r.value.length} characters; the others have ${usual}. Check it`;
+    }
 
     const ok = rows.filter((r) => r.result === 'ok');
     if (apply && ok.length) {
@@ -307,6 +362,135 @@ api.post(
     }
     if (apply && ok.length && field === 'applicationNumber') await resolvePending(await customersForMatching());
     res.json({ applied: !!apply, saved: apply ? ok.length : 0, rows });
+  })
+);
+
+// ---------- smart paste: paste anything, the app works out the rest ----------
+// Each line may hold a mobile number, an English or Gujarati name, an inverter serial number and an
+// application number, in any order. The app finds the customer, checks the values, saves what it is
+// sure about, and returns the rest with the reason and its best suggestions.
+api.post(
+  '/smart-paste',
+  wrap(async (req, res) => {
+    const cfg = await loadDatasheetConfig();
+    const all = await Customer.find({}, { name: 1, sheet: 1, village: 1, mobile: 1, mobiles: 1, englishName: 1, inverterSerial: 1, applicationNumber: 1, inverterRaw: 1 }).lean();
+    const byMobile = new Map();
+    const bySerial = new Map();
+    const byAppNo = new Map();
+    for (const c of all) {
+      for (const m of c.mobiles || []) byMobile.set(m, [...(byMobile.get(m) || []), c]);
+      if (c.inverterSerial) bySerial.set(c.inverterSerial, c);
+      if (c.applicationNumber) byAppNo.set(c.applicationNumber, c);
+      c.shownName = c.englishName || englishName(c.name);
+      c.keys = nameKeys(c.shownName);
+      c.solaryaan = parseInverter(c.inverterRaw, cfg.inverterBrands).brand === 'solaryaan';
+    }
+    const solaryaan = all.filter((c) => c.solaryaan);
+    const card = (c) => ({ id: String(c._id), name: c.name, english: c.shownName, village: c.village, mobile: c.mobile, inverter: c.inverterRaw, serial: c.inverterSerial || '' });
+
+    const parsed = String(req.body?.text || '').split(/\r?\n/).map((raw, i) => ({ line: i + 1, raw: raw.trim(), p: parseLine(raw) })).filter((x) => x.p);
+    const usual = usualLength([...bySerial.keys(), ...parsed.map((x) => x.p.serial)]);
+    const goodSerials = [...bySerial.keys(), ...parsed.map((x) => x.p.serial)].filter((s) => s && s.length === usual);
+
+    const rows = [];
+    const writes = new Map(); // customer id → { fields }
+    for (const { line, raw, p } of parsed) {
+      const row = { line, raw, values: { serial: p.serial, appNo: p.appNo, name: p.name, mobile: p.mobile } };
+      const needs = (reason, extra = {}) => rows.push({ ...row, status: 'needs', reason, ...extra });
+      const pool = p.serial ? solaryaan : all;
+
+      // ---- who is it? mobile number, then application number, then name ----
+      let c = null;
+      let how = '';
+      let note = '';
+      if (p.mobile) {
+        let hits = byMobile.get(p.mobile) || [];
+        if (hits.length > 1 && p.name) {
+          const narrowed = matchByName(p.name, hits).hits;
+          if (narrowed.length === 1) hits = narrowed;
+        }
+        if (hits.length === 1) [c, how] = [hits[0], 'mobile number'];
+        else if (hits.length > 1) {
+          needs(`${hits.length} customers share the mobile number ${p.mobile}`, { suggestions: hits.map(card) });
+          continue;
+        }
+      }
+      if (!c && p.appNo && byAppNo.has(p.appNo) && (p.serial || p.name)) [c, how] = [byAppNo.get(p.appNo), 'application number'];
+      if (!c && p.name) {
+        let m = matchByName(p.name, pool);
+        if (!m.hits.length && pool !== all && matchByName(p.name, all).hits.length) {
+          needs('A customer has this name, but their inverter in Excel is not SOLARYAAN', { suggestions: matchByName(p.name, all).hits.map(card) });
+          continue;
+        }
+        if (m.hits.length === 1) {
+          [c, how] = [m.hits[0], 'name'];
+          if (m.quality === 'ending') note = `Name is written a little differently here (${c.shownName}). Saved, please glance`;
+        } else if (m.hits.length > 1) {
+          needs(`${m.hits.length} customers have this name`, { suggestions: m.hits.map(card) });
+          continue;
+        }
+      }
+      if (!c) {
+        const near = p.name ? nearNames(p.name, pool).map(card) : [];
+        needs(
+          p.mobile ? `No customer has the mobile number ${p.mobile}` : p.name ? (near.length ? 'No customer has exactly this name. Is it one of these?' : 'No customer has this name') : 'This line has no mobile number or name to find the customer by',
+          { suggestions: near }
+        );
+        continue;
+      }
+      row.customer = card(c);
+      row.how = how;
+
+      // ---- what is there to save, and is each value sound? ----
+      const set = {};
+      const same = [];
+      let problem = null;
+      if (p.serial) {
+        const owner = bySerial.get(p.serial);
+        const twice = parsed.filter((x) => x.p.serial === p.serial).length > 1;
+        if (c.inverterSerial === p.serial) same.push('serial');
+        else if (!c.solaryaan) problem = { reason: `This customer's inverter is not SOLARYAAN (${c.inverterRaw || 'blank in Excel'}), so it has no warranty serial` };
+        else if (usual && p.serial.length !== usual) {
+          const fix = suggestSerial(p.serial, goodSerials);
+          problem = { reason: `Serial ${p.serial} has ${p.serial.length} characters; the others have ${usual}`, suggestedSerial: fix && !bySerial.has(fix) ? fix : '' };
+        } else if (owner && String(owner._id) !== String(c._id)) problem = { reason: `Serial ${p.serial} is already saved for ${owner.name}` };
+        else if (twice) problem = { reason: `Serial ${p.serial} appears on more than one line` };
+        else if (c.inverterSerial) problem = { reason: `This customer already has serial ${c.inverterSerial}`, replace: { inverterSerial: p.serial } };
+        else set.inverterSerial = p.serial;
+      }
+      if (!problem && p.appNo && how !== 'application number') {
+        const owner = byAppNo.get(p.appNo);
+        if (c.applicationNumber === p.appNo) same.push('application number');
+        else if (owner && String(owner._id) !== String(c._id)) problem = { reason: `Application number ${p.appNo} is already saved for ${owner.name}` };
+        else if (c.applicationNumber) problem = { reason: `This customer already has application number ${c.applicationNumber}`, replace: { applicationNumber: p.appNo } };
+        else set.applicationNumber = p.appNo;
+      }
+      // A name beside a mobile or application number is the English name to print.
+      if (!problem && p.name && how !== 'name') {
+        if (c.englishName === p.name) same.push('name');
+        else if (c.englishName) problem = { reason: `This customer already has the English name ${c.englishName}`, replace: { englishName: p.name } };
+        else set.englishName = p.name;
+      }
+      const earlier = writes.get(String(c._id));
+      if (!problem && earlier && Object.keys(set).some((k) => earlier[k] && earlier[k] !== set[k])) problem = { reason: 'Another line gives this customer a different value' };
+
+      if (problem) {
+        needs(problem.reason, { suggestedSerial: problem.suggestedSerial || '', replace: problem.replace || null });
+        continue;
+      }
+      if (!Object.keys(set).length) {
+        rows.push(same.length ? { ...row, status: 'same' } : { ...row, status: 'needs', reason: 'Nothing to save on this line: add the serial number, application number or name' });
+        continue;
+      }
+      writes.set(String(c._id), { ...(earlier || {}), ...set });
+      rows.push({ ...row, status: 'saved', saved: set, undo: Object.fromEntries(Object.keys(set).map((k) => [k, c[k] || ''])), note });
+    }
+
+    if (writes.size) {
+      await Customer.bulkWrite([...writes.entries()].map(([id, set]) => ({ updateOne: { filter: { _id: new mongoose.Types.ObjectId(id) }, update: { $set: set } } })));
+      if ([...writes.values()].some((s) => s.applicationNumber)) await resolvePending(await customersForMatching());
+    }
+    res.json({ rows });
   })
 );
 

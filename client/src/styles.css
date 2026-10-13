@@ -359,3 +359,7 @@ table.grid { width: 100%; border-collapse: collapse; font-size: 14.5px; }
 .grid.rows .name { font-size: 14.5px; }
 .grid.rows td.wrap { min-width: 110px; max-width: 170px; }
 @media (max-width: 960px) { .app { grid-template-columns: 1fr; } .main { padding-left: 16px; padding-right: 16px; } }
+
+.mono { font-family: Consolas, "Nirmala UI", monospace; font-size: 13.5px; word-break: break-all; }
+.chip:disabled { opacity: 0.5; cursor: not-allowed; }
+.chips a { margin-left: 4px; }
