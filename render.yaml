@@ -1,0 +1,20 @@
+# Render blueprint: one free web service. It has no disk, so uploaded PDFs go to Cloudinary.
+services:
+  - type: web
+    name: solar-customer-files
+    runtime: docker
+    plan: free
+    region: singapore
+    healthCheckPath: /api/me
+    envVars:
+      # Typed in the Render dashboard, never stored in this file.
+      - key: MONGODB_URI
+        sync: false
+      - key: APP_PASSWORD
+        sync: false
+      - key: CLOUDINARY_CLOUD_NAME
+        sync: false
+      - key: CLOUDINARY_API_KEY
+        sync: false
+      - key: CLOUDINARY_API_SECRET
+        sync: false

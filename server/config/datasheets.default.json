@@ -1,0 +1,275 @@
+{
+  "panelBrands": {
+    "adani": [
+      "અદાણી",
+      "adani"
+    ],
+    "waaree": [
+      "વારી",
+      "waaree"
+    ],
+    "aps": [
+      "aps"
+    ],
+    "tata": [
+      "ટાટા",
+      "tata"
+    ]
+  },
+  "inverterBrands": {
+    "solaryaan": [
+      "સોલારયાન",
+      "solaryaan"
+    ],
+    "velox": [
+      "velox"
+    ],
+    "aps": [
+      "aps"
+    ],
+    "polycab": [
+      "પોલીકેબ",
+      "polycab"
+    ],
+    "waaree": [
+      "વારી",
+      "waaree"
+    ],
+    "solex": [
+      "સોલેક્ષ",
+      "solex"
+    ],
+    "goodwe": [
+      "ગૂડ વે",
+      "ગુડ વે",
+      "goodwe"
+    ],
+    "havells": [
+      "હેવેલ્સ",
+      "havells"
+    ]
+  },
+  "rules": [
+    {
+      "id": "adani-perc",
+      "kind": "panel",
+      "label": "Adani PERC 520–555 W",
+      "brand": "adani",
+      "file": "Adani datasheet/datasheet-adani-solar-india-520w-525w-530w-535w-540w-545w-550w-555w-mbb-p-type-perc-half-cut-bifacial-g2g-182mm-elan-shine-gen-ii-v20241221.pdf",
+      "topcon": null,
+      "minWatt": 520,
+      "maxWatt": 555,
+      "pages": ""
+    },
+    {
+      "id": "adani-topcon",
+      "kind": "panel",
+      "label": "Adani TOPCon 605–640 W",
+      "brand": "adani",
+      "file": "adani topcon/datasheet-adani-solar-india-605w-610w-615w-620w-625w-630w-635w-640w-g2g-topcon-n-type-dcr-non-dcr-elan-shine.pdf",
+      "topcon": null,
+      "minWatt": 605,
+      "maxWatt": 640,
+      "pages": ""
+    },
+    {
+      "id": "waaree-perc",
+      "kind": "panel",
+      "label": "Waaree PERC 515–545 W",
+      "brand": "waaree",
+      "file": "waaree penel datasheet/datasheet-waaree-solar-mono-perc-m10-515W-520W-525W-530W-535W-540W-545W.pdf",
+      "topcon": null,
+      "minWatt": 515,
+      "maxWatt": 545,
+      "pages": ""
+    },
+    {
+      "id": "waaree-bifacial-550",
+      "kind": "panel",
+      "label": "Waaree 550 W (Ahnay bifacial 520–550)",
+      "brand": "waaree",
+      "file": "Waaree bifacial/datasheet_bi_55_520_550.pdf",
+      "topcon": null,
+      "minWatt": 546,
+      "maxWatt": 555,
+      "pages": ""
+    },
+    {
+      "id": "waaree-topcon-615-650",
+      "kind": "panel",
+      "label": "Waaree TOPCon 615–650 W (incl. Non-DCR 615)",
+      "brand": "waaree",
+      "file": "Waaree topcon/datasheet-waaree-elite-n-type-bifacial-615W-620W-625W-630W-635W-640W-645W-650W.pdf",
+      "topcon": null,
+      "minWatt": 615,
+      "maxWatt": 650,
+      "pages": ""
+    },
+    {
+      "id": "waaree-topcon-565-600",
+      "kind": "panel",
+      "label": "Waaree TOPCon 565–600 W (580/585)",
+      "brand": "waaree",
+      "file": "Waaree topcon/elite_series_bin_08_565_600_wel_epd_565_600_144_bin_hc_09_03012025_1756378918.pdf",
+      "topcon": null,
+      "minWatt": 565,
+      "maxWatt": 599,
+      "pages": ""
+    },
+    {
+      "id": "waaree-topcon-600-635",
+      "kind": "panel",
+      "label": "Waaree TOPCon 600–635 W (610)",
+      "brand": "waaree",
+      "file": "Waaree topcon/elite_r_series_bin_21_600_635_wel_epd_600_635_132_bin_hc_03_16102024_1758688896.pdf",
+      "topcon": null,
+      "minWatt": 600,
+      "maxWatt": 635,
+      "pages": ""
+    },
+    {
+      "id": "aps-topcon",
+      "kind": "panel",
+      "label": "APS TOPCon 560–600 W",
+      "brand": "aps",
+      "file": "APS/Topcon-560W-to-600w_144C-1.pdf",
+      "topcon": true,
+      "minWatt": 560,
+      "maxWatt": 600,
+      "pages": ""
+    },
+    {
+      "id": "aps-550",
+      "kind": "panel",
+      "label": "APS 550 W (not TOPCon)",
+      "brand": "aps",
+      "file": "APS/Mono-Facial_530W-to-560W_144C.pdf",
+      "topcon": false,
+      "minWatt": 530,
+      "maxWatt": 560,
+      "pages": ""
+    },
+    {
+      "id": "aps-600",
+      "kind": "panel",
+      "label": "APS 600 W (TOPCon not written in Excel)",
+      "brand": "aps",
+      "file": "APS/Topcon-560W-to-600w_144C-1.pdf",
+      "topcon": false,
+      "minWatt": 580,
+      "maxWatt": 600,
+      "pages": ""
+    },
+    {
+      "id": "tata",
+      "kind": "panel",
+      "label": "Tata 570–600 W",
+      "brand": "tata",
+      "file": "Tata/TP600LG10B(Glass-Glass).pdf",
+      "topcon": null,
+      "minWatt": 570,
+      "maxWatt": 600,
+      "pages": ""
+    },
+    {
+      "id": "inv-velox",
+      "kind": "inverter",
+      "label": "VELOX single phase up to 4.6 kW",
+      "brand": "velox",
+      "file": "Inverters/VELOX/VE-1.1-KW-to-VE-6.0-KW.pdf",
+      "minKw": null,
+      "maxKw": 4.6,
+      "pages": "2-3"
+    },
+    {
+      "id": "inv-velox-5-6",
+      "kind": "inverter",
+      "label": "VELOX single phase 5 to 6 kW",
+      "brand": "velox",
+      "file": "Inverters/VELOX/VE-1.1-KW-to-VE-6.0-KW.pdf",
+      "minKw": 4.61,
+      "maxKw": 6,
+      "pages": "4-5"
+    },
+    {
+      "id": "inv-velox-3ph",
+      "kind": "inverter",
+      "label": "VELOX three phase (above 6 kW)",
+      "brand": "velox",
+      "file": "Inverters/VELOX/VET-5.5-KW-to-VET-136.0-KW.pdf",
+      "minKw": 6.01,
+      "maxKw": null,
+      "pages": ""
+    },
+    {
+      "id": "inv-aps",
+      "kind": "inverter",
+      "label": "APS single phase",
+      "brand": "aps",
+      "file": "Inverters/APS/APS-GTI-1.0-SINGLE-PHASE.pdf",
+      "minKw": null,
+      "maxKw": null,
+      "pages": ""
+    },
+    {
+      "id": "inv-polycab",
+      "kind": "inverter",
+      "label": "Polycab single phase (up to 4 kW)",
+      "brand": "polycab",
+      "file": "Inverters/Polycab/polycab_inverter_1ph_1kw-4kw_v4.pdf",
+      "minKw": null,
+      "maxKw": 4,
+      "pages": ""
+    },
+    {
+      "id": "inv-polycab-large",
+      "kind": "inverter",
+      "label": "Polycab single phase above 4 kW",
+      "brand": "polycab",
+      "file": "Inverters/Polycab/solar-catalogue.pdf",
+      "minKw": 4.01,
+      "maxKw": null,
+      "pages": "6-7"
+    },
+    {
+      "id": "inv-waaree",
+      "kind": "inverter",
+      "label": "Waaree single phase up to 3.3 kW",
+      "brand": "waaree",
+      "file": "Inverters/Waaree/inverter_brochure.pdf",
+      "minKw": null,
+      "maxKw": null,
+      "pages": "6"
+    },
+    {
+      "id": "inv-solex",
+      "kind": "inverter",
+      "label": "Solex (assumed SolaX X1-MINI)",
+      "brand": "solex",
+      "file": "Inverters/SolaX/x1-mini-g4-datasheet-en.pdf",
+      "minKw": null,
+      "maxKw": null,
+      "pages": ""
+    },
+    {
+      "id": "inv-goodwe",
+      "kind": "inverter",
+      "label": "GoodWe (3–6 kW)",
+      "brand": "goodwe",
+      "file": "Inverters/GoodWe/GW_DNS-G3_Datasheet-EN.pdf",
+      "minKw": null,
+      "maxKw": null,
+      "pages": ""
+    },
+    {
+      "id": "inv-havells",
+      "kind": "inverter",
+      "label": "Havells single phase 4 to 6 kW",
+      "brand": "havells",
+      "file": "Inverters/Havells/Solar_Grid-Tie_Inverter.pdf",
+      "minKw": null,
+      "maxKw": null,
+      "pages": "8"
+    }
+  ]
+}
