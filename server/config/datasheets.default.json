@@ -59,7 +59,8 @@
       "topcon": null,
       "minWatt": 520,
       "maxWatt": 555,
-      "pages": ""
+      "pages": "",
+      "dcr": "ASBP, ASB-M10"
     },
     {
       "id": "adani-topcon",
@@ -70,29 +71,32 @@
       "topcon": null,
       "minWatt": 605,
       "maxWatt": 640,
-      "pages": ""
+      "pages": "",
+      "dcr": "ASBT, G12R"
+    },
+    {
+      "id": "waaree-bifacial-550",
+      "kind": "panel",
+      "label": "Waaree 520–550 W (BI-55 glass-glass bifacial, as on the DCRs)",
+      "brand": "waaree",
+      "file": "Waaree bifacial/datasheet_bi_55_520_550.pdf",
+      "topcon": null,
+      "minWatt": 520,
+      "maxWatt": 550,
+      "pages": "",
+      "dcr": "BI-55"
     },
     {
       "id": "waaree-perc",
       "kind": "panel",
-      "label": "Waaree PERC 515–545 W",
+      "label": "Waaree Mono PERC 515–545 W (only when the DCR says so)",
       "brand": "waaree",
       "file": "waaree penel datasheet/datasheet-waaree-solar-mono-perc-m10-515W-520W-525W-530W-535W-540W-545W.pdf",
       "topcon": null,
       "minWatt": 515,
       "maxWatt": 545,
-      "pages": ""
-    },
-    {
-      "id": "waaree-bifacial-550",
-      "kind": "panel",
-      "label": "Waaree 550 W (Ahnay bifacial 520–550)",
-      "brand": "waaree",
-      "file": "Waaree bifacial/datasheet_bi_55_520_550.pdf",
-      "topcon": null,
-      "minWatt": 546,
-      "maxWatt": 555,
-      "pages": ""
+      "pages": "",
+      "dcr": ""
     },
     {
       "id": "waaree-topcon-615-650",
@@ -103,7 +107,8 @@
       "topcon": null,
       "minWatt": 615,
       "maxWatt": 650,
-      "pages": ""
+      "pages": "",
+      "dcr": "BiN-02"
     },
     {
       "id": "waaree-topcon-565-600",
@@ -114,7 +119,8 @@
       "topcon": null,
       "minWatt": 565,
       "maxWatt": 599,
-      "pages": ""
+      "pages": "",
+      "dcr": "BiN-08"
     },
     {
       "id": "waaree-topcon-600-635",
@@ -125,7 +131,8 @@
       "topcon": null,
       "minWatt": 600,
       "maxWatt": 635,
-      "pages": ""
+      "pages": "",
+      "dcr": "BiN-21"
     },
     {
       "id": "aps-topcon",
@@ -136,18 +143,20 @@
       "topcon": true,
       "minWatt": 560,
       "maxWatt": 600,
-      "pages": ""
+      "pages": "",
+      "dcr": "APSTM"
     },
     {
       "id": "aps-550",
       "kind": "panel",
-      "label": "APS 550 W (not TOPCon)",
+      "label": "APS 530–555 W bifacial (APSBF, as on the DCR)",
       "brand": "aps",
-      "file": "APS/Mono-Facial_530W-to-560W_144C.pdf",
+      "file": "APS/Mono-990-Bifacial-530W-to-555W_144C.pdf",
       "topcon": false,
       "minWatt": 530,
       "maxWatt": 560,
-      "pages": ""
+      "pages": "",
+      "dcr": "APSBF"
     },
     {
       "id": "aps-600",
@@ -158,7 +167,8 @@
       "topcon": false,
       "minWatt": 580,
       "maxWatt": 600,
-      "pages": ""
+      "pages": "",
+      "dcr": ""
     },
     {
       "id": "tata",
@@ -169,7 +179,20 @@
       "topcon": null,
       "minWatt": 570,
       "maxWatt": 600,
-      "pages": ""
+      "pages": "",
+      "dcr": "LG10B"
+    },
+    {
+      "id": "tata-tb",
+      "kind": "panel",
+      "label": "Tata glass-transparent backsheet (LG10TB)",
+      "brand": "tata",
+      "file": "Tata/TP600LG10TB(Glass-Transparent-Backsheet).pdf",
+      "topcon": null,
+      "minWatt": 570,
+      "maxWatt": 600,
+      "pages": "",
+      "dcr": "LG10TB"
     },
     {
       "id": "inv-velox",
@@ -271,5 +294,6 @@
       "maxKw": null,
       "pages": "8"
     }
-  ]
+  ],
+  "dcrVersion": 1
 }

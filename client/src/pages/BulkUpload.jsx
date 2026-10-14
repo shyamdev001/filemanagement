@@ -111,6 +111,7 @@ export default function BulkUpload({ customers, onChanged }) {
   const [busy, setBusy] = useState('');
   const [over, setOver] = useState(false);
   const [error, setError] = useState('');
+  const [touched, setTouched] = useState([]);
 
   const loadPending = useCallback(() => api.get('/pending').then((d) => setPending(d.pending)).catch((e) => setError(e.message)), []);
   useEffect(() => {
@@ -122,6 +123,7 @@ export default function BulkUpload({ customers, onChanged }) {
     if (!files.length) return setError('Choose PDF files.');
     setError('');
     const all = [];
+    const people = new Map();
     try {
       // Sent in small groups so a big batch does not time out.
       for (let i = 0; i < files.length; i += 10) {
@@ -130,9 +132,11 @@ export default function BulkUpload({ customers, onChanged }) {
         files.slice(i, i + 10).forEach((f) => body.append('files', f));
         const d = await api.post('/uploads/bulk', body);
         all.push(...d.results);
-        // PDFs that were already waiting and could be placed now that their application number is known.
-        all.push(...(d.alsoFiled || []).map((f) => ({ ...f, name: `${f.name} (was waiting)`, result: 'saved', how: 'application number' })));
+        // PDFs that were already waiting and could be placed now that more is known.
+        all.push(...(d.alsoFiled || []).map((f) => ({ ...f, name: `${f.name} (was waiting)` })));
+        for (const c of d.customers || []) people.set(c.id, c);
         setResults([...all]);
+        setTouched([...people.values()]);
       }
     } catch (e) {
       setError(e.message);
@@ -146,8 +150,10 @@ export default function BulkUpload({ customers, onChanged }) {
     loadPending();
     onChanged();
   };
-  const saved = results ? results.filter((r) => r.result === 'saved').length : 0;
-  const queued = results ? results.filter((r) => r.result === 'pending').length : 0;
+  const count = (kind) => (results ? results.filter((r) => r.result === kind).length : 0);
+  const saved = count('saved');
+  const queued = count('pending') + count('rejected');
+  const incomplete = touched.filter((c) => Object.values(c.has).some((v) => !v));
 
   return (
     <div className="page narrow" style={{ maxWidth: 980 }}>
@@ -155,9 +161,9 @@ export default function BulkUpload({ customers, onChanged }) {
         <div>
           <h1><T en="Upload PDFs" gu="PDF અપલોડ" /></h1>
           <p className="prose">
-            Drop the DCR, Model Agreement and FL PDFs here, many at once, in any order. The app reads each one and files it
-            under the right customer: the FL by its mobile number, then the Agreement and DCR by the application number
-            they share with that FL. Anything it is not sure about waits below for you.
+            Drop the DCR, Model Agreement and FL PDFs here, many at once, in any order and without renaming. The app reads
+            every PDF, checks the application number, mobile number, name and village in it against your customers, and
+            files it. At the end it tells you only what it could not settle, and which customers are still missing a document.
           </p>
         </div>
       </div>
@@ -171,41 +177,84 @@ export default function BulkUpload({ customers, onChanged }) {
         <div className="drop-icon"><FileUp size={22} /></div>
         <div style={{ flex: 1, minWidth: 0 }}>
           <b>{busy || 'Drag PDF files here, or click to choose'}</b>
-          <span className="hint">Tip: if the file name has the customer's mobile number, it is matched every time.</span>
+          <span className="hint">Upload a customer's FL together with their Agreement and DCR: the FL makes the other two certain.</span>
         </div>
         <input type="file" accept=".pdf,application/pdf" multiple disabled={!!busy} onChange={(e) => { send(e.target.files); e.target.value = ''; }} />
       </label>
       {error && <Notice>{error}</Notice>}
 
       {results && (
-        <section className="panel">
-          <div className="panel-head">
-            <h2>This upload</h2>
-            <span className="hint">{saved} filed automatically · {queued} waiting for you</span>
+        <>
+          <div className="panel figures">
+            <div><b>{saved}</b><span>filed by the app</span></div>
+            <div><b>{count('same')}</b><span>already there</span></div>
+            <div><b>{queued}</b><span>need you</span></div>
+            <div><b>{touched.length - incomplete.length}</b><span>customers now complete</span></div>
           </div>
-          <div className="table-scroll">
-            <table className="grid">
-              <thead><tr><th>File</th><th>Result</th><th>Where it went</th></tr></thead>
-              <tbody>
-                {results.map((r, i) => (
-                  <tr key={i}>
-                    <td>{r.name}</td>
-                    <td>
-                      {r.result === 'saved' && <span className="pill ok"><Check size={13} strokeWidth={3} /> Filed</span>}
-                      {r.result === 'pending' && <span className="pill warn">Waiting for you</span>}
-                      {r.result === 'rejected' && <span className="pill no">Not accepted</span>}
-                    </td>
-                    <td>
-                      {r.result === 'saved'
-                        ? <><Link to={`/customer/${r.customer.id}`} lang="gu">{r.customer.name}</Link> · {TYPES[r.type]} <span className="sub">matched by {r.how}</span></>
-                        : r.reason}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </section>
+
+          {!busy && results.length > 0 && !queued && !incomplete.length && (
+            <Notice kind="warn"><b>All done.</b> Every PDF is filed and every customer in this upload has all three documents.</Notice>
+          )}
+
+          {incomplete.length > 0 && (
+            <section className="panel">
+              <div className="panel-head">
+                <h2><T en="Still missing a document" gu="દસ્તાવેજ બાકી" /></h2>
+                <span className="hint">customers from this upload</span>
+              </div>
+              <div className="table-scroll">
+                <table className="grid">
+                  <thead><tr><th>Customer</th><th className="c">DCR</th><th className="c">Agreement</th><th className="c">FL</th><th>Download from the portal</th></tr></thead>
+                  <tbody>
+                    {incomplete.map((c) => (
+                      <tr key={c.id}>
+                        <td><Link to={`/customer/${c.id}`} lang="gu">{c.name}</Link><div className="sub">{[c.english, c.village].filter(Boolean).join(' · ')}</div></td>
+                        {['dcr', 'agreement', 'fl'].map((t) => (
+                          <td key={t} className="c"><span className={c.has[t] ? 'mark ok' : 'mark no'}>{c.has[t] ? <Check size={14} strokeWidth={3} /> : <X size={14} strokeWidth={3} />}</span></td>
+                        ))}
+                        <td>{Object.keys(c.has).filter((t) => !c.has[t]).map((t) => TYPES[t]).join(', ')}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </section>
+          )}
+
+          <section className="panel">
+            <div className="panel-head">
+              <h2>What happened to each file</h2>
+              <span className="hint">{results.length} files</span>
+            </div>
+            <div className="table-scroll">
+              <table className="grid">
+                <thead><tr><th>File</th><th>Result</th><th>Where it went</th></tr></thead>
+                <tbody>
+                  {results.map((r, i) => (
+                    <tr key={i}>
+                      <td>{r.name}</td>
+                      <td>
+                        {r.result === 'saved' && <span className="pill ok"><Check size={13} strokeWidth={3} /> Filed</span>}
+                        {r.result === 'same' && <span className="pill">Already there</span>}
+                        {r.result === 'pending' && <span className="pill warn">Needs you</span>}
+                        {r.result === 'rejected' && <span className="pill no">Not accepted</span>}
+                      </td>
+                      <td>
+                        {r.customer ? (
+                          <>
+                            <Link to={`/customer/${r.customer.id}`} lang="gu">{r.customer.name}</Link> · {TYPES[r.type]}{' '}
+                            <span className="sub">{r.result === 'same' ? 'this exact PDF was filed before' : `found by ${r.how}`}</span>
+                            {r.note && <div className="sub warn">{r.note}. Please glance.</div>}
+                          </>
+                        ) : r.reason}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </section>
+        </>
       )}
 
       <section className="panel">

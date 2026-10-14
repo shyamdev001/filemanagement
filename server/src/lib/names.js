@@ -116,3 +116,24 @@ export function nearNames(name, customers, limit = 3) {
     .slice(0, limit)
     .map((x) => x.c);
 }
+
+/**
+ * Do two names belong to the same person? Used to confirm a match made another way (a mobile number
+ * or an application number), because one mobile number is often used for several people.
+ * `keys` is the customer's name prepared with nameKeys(). At least two words must agree, and every
+ * word of the shorter name must be found in the longer one.
+ */
+export function namesAgree(name, keys) {
+  const want = nameKeys(name);
+  if (want.length < 2 || !keys || keys.length < 2) return false;
+  const free = [...keys];
+  let found = 0;
+  for (const w of want) {
+    const i = free.findIndex((k) => sameWord(w, k) > 0);
+    if (i >= 0) {
+      found++;
+      free.splice(i, 1);
+    }
+  }
+  return found >= 2 && found >= Math.min(want.length, keys.length);
+}

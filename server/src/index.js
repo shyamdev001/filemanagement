@@ -4,8 +4,12 @@ import express from 'express';
 import mongoose from 'mongoose';
 import { config } from './config.js';
 import { api } from './api.js';
-import { closeBrowser } from './lib/pdf.js';
+import { portal, portalCors } from './portal.js';
+import { SERVER_DIR } from './config.js';
+import compression from 'compression';
+import { closeBrowser, warmUp } from './lib/pdf.js';
 import { storage } from './lib/storage.js';
+import { backfillDcrPanels } from './lib/dcr.js';
 
 if (config.hosted && config.appPassword.length < 8) {
   console.error('\nAPP_PASSWORD is missing or shorter than 8 characters. The hosted app holds customer documents and will not start without a password.\n');
@@ -26,12 +30,25 @@ try {
 
 const app = express();
 app.set('trust proxy', 1);
+app.use(compression());
 app.use(express.json({ limit: '5mb' }));
+// The portal helper: its script, and the endpoints it calls from the vendor portal page.
+app.get('/portal-helper.js', portalCors, (req, res) => {
+  res.setHeader('Cache-Control', 'no-cache');
+  res.type('application/javascript').sendFile(path.join(SERVER_DIR, 'public', 'portal-helper.js'));
+});
+app.options('/portal-helper.js', portalCors);
+app.use('/api/portal', portal);
 app.use('/api', api);
 
 // The built React app (client/dist) is served by the same server.
 if (fs.existsSync(config.clientDist)) {
-  app.use(express.static(config.clientDist));
+  // Files under /assets carry a fingerprint in their name, so the browser may keep them for good.
+  app.use(
+    express.static(config.clientDist, {
+      setHeaders: (res, file) => res.setHeader('Cache-Control', /[\\/]assets[\\/]/.test(file) ? 'public, max-age=31536000, immutable' : 'no-cache'),
+    })
+  );
   app.get('*', (req, res) => res.sendFile(path.join(config.clientDist, 'index.html')));
 }
 
@@ -45,6 +62,11 @@ server.on('error', (err) => {
   } else console.error(err);
   process.exit(1);
 });
+
+// On a PC, start the PDF engine now so the first preview is quick. A small host starts it when needed.
+if (!config.hosted) warmUp();
+// DCRs filed before the app read their panel details.
+backfillDcrPanels().catch((err) => console.error('DCR backfill:', err.message));
 
 for (const sig of ['SIGINT', 'SIGTERM']) {
   process.on(sig, async () => {

@@ -83,7 +83,7 @@ function UploadSlot({ n, slot, doc, customerId, stamp, onDone, onError }) {
   );
 }
 
-export default function CustomerDetail({ onChanged }) {
+export default function CustomerDetail({ customers, onChanged }) {
   const { id } = useParams();
   const navigate = useNavigate();
   const [c, setC] = useState(null);
@@ -105,7 +105,10 @@ export default function CustomerDetail({ onChanged }) {
   };
 
   useEffect(() => {
-    setC(null);
+    // Show the customer at once from the list already in memory, then refresh quietly.
+    const known = (customers || []).find((x) => x._id === id);
+    if (known) take(known);
+    else setC(null);
     api.get(`/customers/${id}`).then((d) => take(d.customer)).catch((e) => setError(e.message));
     api.get('/settings/datasheets').then((d) => setFiles(d.files)).catch(() => {});
   }, [id]);
@@ -117,7 +120,7 @@ export default function CustomerDetail({ onChanged }) {
       take(d.customer);
       setMsg(done);
       setTimeout(() => setMsg(''), 2500);
-      onChanged();
+      onChanged(d.customer);
     } catch (e) {
       setError(e.message);
     }
@@ -197,6 +200,12 @@ export default function CustomerDetail({ onChanged }) {
               <div className="doc-title"><h3><T en="Panel datasheet" gu="પેનલ ડેટાશીટ" /></h3><DocStatus doc={st.datasheet} /></div>
               <Problems items={st.datasheet.problems} />
               {st.datasheet.files.map((f) => <FileLink key={f} file={f} />)}
+              {!st.datasheet.manual && (
+                <p className="muted" style={{ fontSize: 13.5, margin: "4px 0" }}>
+                  {st.datasheet.source === 'dcr' ? <>Chosen from the DCR certificate: {st.datasheet.dcr.join(', ')}</> : <>Chosen from the Excel panel: {c.panelRaw || '–'}</>}
+                </p>
+              )}
+              {(st.datasheet.notes || []).map((n) => <p key={n} className="muted" style={{ fontSize: 13.5, margin: "4px 0" }}>{n}</p>)}
               <label className="pick">
                 {st.datasheet.manual ? 'Chosen by hand for this customer. Add another:' : 'Wrong or missing? Choose by hand for this customer only:'}
                 <select
@@ -253,7 +262,7 @@ export default function CustomerDetail({ onChanged }) {
                 setError('');
                 setMsg(done);
                 setTimeout(() => setMsg(''), 2500);
-                onChanged();
+                onChanged(customer);
               }}
             />
           ))}

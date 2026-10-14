@@ -4,7 +4,7 @@ import { api } from '../api.js';
 import { Notice, T } from '../ui.jsx';
 
 const BRAND = { adani: 'Adani', waaree: 'Waaree', aps: 'APS', tata: 'Tata' };
-const blank = { label: '', brand: 'adani', topcon: null, minWatt: '', maxWatt: '', file: null };
+const blank = { label: '', brand: 'adani', topcon: null, minWatt: '', maxWatt: '', file: null, dcr: '' };
 
 const FileSelect = ({ rule, files, onPick }) => (
   <select className={rule.file ? '' : 'needs'} aria-label={`Datasheet for ${rule.label}`} value={rule.file || ''} onChange={(e) => onPick(rule.id, e.target.value)}>
@@ -24,6 +24,20 @@ const PagesInput = ({ rule, onSave }) => (
     style={{ width: 76 }}
     defaultValue={rule.pages || ''}
     onBlur={(e) => e.target.value.trim() !== (rule.pages || '') && onSave(rule.id, e.target.value.trim())}
+  />
+);
+
+/** Model codes printed on the DCR certificate that mean this datasheet. Saves when you leave the box. */
+const DcrInput = ({ rule, onSave }) => (
+  <input
+    key={rule.dcr || ''}
+    type="text"
+    aria-label={`DCR model codes for ${rule.label}`}
+    placeholder="any"
+    title="Model codes printed on the DCR certificate, for example BI-55 or BiN-21. When a customer's DCR shows one of these, this datasheet is used."
+    style={{ width: 120 }}
+    defaultValue={rule.dcr || ''}
+    onBlur={(e) => e.target.value.trim() !== (rule.dcr || '') && onSave(rule.id, e.target.value.trim())}
   />
 );
 
@@ -75,6 +89,7 @@ export default function Settings({ customers, onChanged }) {
 
   const setFile = (id, file) => save(rules.map((r) => (r.id === id ? { ...r, file: file || null } : r)));
   const setPages = (id, pages) => save(rules.map((r) => (r.id === id ? { ...r, pages } : r)));
+  const setDcr = (id, dcr) => save(rules.map((r) => (r.id === id ? { ...r, dcr } : r)));
   const remove = (r) => window.confirm(`Remove the rule "${r.label}"?`) && save(rules.filter((x) => x.id !== r.id));
   const add = (e) => {
     e.preventDefault();
@@ -110,17 +125,18 @@ export default function Settings({ customers, onChanged }) {
       <section className="panel">
         <div className="panel-head">
           <h2><T en="Panel datasheets" gu="પેનલ ડેટાશીટ" /></h2>
-          <span className="hint">Checked from top to bottom; the first rule that fits is used.</span>
+          <span className="hint">When the customer's DCR is uploaded, the panels it lists decide (a rule whose code is on the DCR wins). Without a DCR the Excel decides; rules are checked from top to bottom.</span>
         </div>
         <div className="table-scroll">
           <table className="grid">
-            <thead><tr><th>Rule</th><th>Type</th><th className="r">Watt</th><th>Datasheet PDF</th><th>Pages</th><th aria-label="Remove" /></tr></thead>
+            <thead><tr><th>Rule</th><th>Type</th><th className="r">Watt</th><th>Code on DCR</th><th>Datasheet PDF</th><th>Pages</th><th aria-label="Remove" /></tr></thead>
             <tbody>
               {rules.filter((r) => r.kind === 'panel').map((r) => (
                 <tr key={r.id}>
                   <td><div className="name">{r.label}</div></td>
                   <td>{r.topcon === true ? 'TOPCon only' : r.topcon === false ? 'Not TOPCon' : 'Any'}</td>
                   <td className="r">{r.minWatt}–{r.maxWatt}</td>
+                  <td><DcrInput rule={r} onSave={setDcr} /></td>
                   <td><FileSelect rule={r} files={files} onPick={setFile} /></td>
                   <td><PagesInput rule={r} onSave={setPages} /></td>
                   <td><button className="btn quiet small" aria-label={`Remove ${r.label}`} title="Remove this rule" onClick={() => remove(r)}><Trash2 size={16} /></button></td>

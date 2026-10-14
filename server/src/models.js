@@ -31,8 +31,12 @@ const customerSchema = new mongoose.Schema(
 
     // PDFs from the portal: uploads.dcr / .agreement / .fl = { originalName, size, uploadedAt }
     uploads: { type: mongoose.Schema.Types.Mixed, default: {} },
+    // Modules listed on the DCR certificate: { read, maker, items: [{ code, watt, qty, brand, topcon }] }.
+    dcrPanels: { type: mongoose.Schema.Types.Mixed, default: null },
     // PM Surya Ghar application reference number (NP-GJMG25-…), learned from the FL or typed.
     applicationNumber: { type: String, default: '', index: true },
+    // From the vendor portal's application list: { appId, consumerNo, status }.
+    portal: { type: mongoose.Schema.Types.Mixed, default: null },
     // Printed by hand and put in the file.
     billAttached: { type: Boolean, default: false },
     insuranceAttached: { type: Boolean, default: false },

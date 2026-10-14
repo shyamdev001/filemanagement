@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Link, NavLink, Route, Routes } from 'react-router-dom';
-import { ClipboardPaste, FileSpreadsheet, FileUp, FolderCog, LogOut, Printer, Users } from 'lucide-react';
+import { ClipboardPaste, FileSpreadsheet, FileUp, FolderCog, Globe, LogOut, Printer, Users } from 'lucide-react';
 import Print from './pages/Print.jsx';
+import PortalHelper from './pages/PortalHelper.jsx';
 import { api } from './api.js';
 import { BrandMark, Notice } from './ui.jsx';
 import Customers from './pages/Customers.jsx';
@@ -15,6 +16,7 @@ import Login from './pages/Login.jsx';
 const NAV = [
   { to: '/', end: true, icon: Users, en: 'Customers', gu: 'ગ્રાહકો' },
   { to: '/upload', icon: FileUp, en: 'Upload PDFs', gu: 'PDF અપલોડ' },
+  { to: '/portal', icon: Globe, en: 'Portal helper', gu: 'પોર્ટલ હેલ્પર' },
   { to: '/print', icon: Printer, en: 'Print files', gu: 'ફાઈલ પ્રિન્ટ' },
   { to: '/bulk', icon: ClipboardPaste, en: 'Names & serials', gu: 'નામ અને સીરીયલ નંબર' },
   { to: '/import', icon: FileSpreadsheet, en: 'Import Excel', gu: 'એક્સેલ ઈમ્પોર્ટ' },
@@ -37,6 +39,15 @@ export default function App() {
       setError(e.message);
     }
   }, []);
+
+  // After a change to one customer the page hands back the fresh record: swap it in, no reload needed.
+  const changed = useCallback(
+    (customer) => {
+      if (customer && customer._id) setCustomers((list) => (list ? list.map((c) => (c._id === customer._id ? customer : c)) : list));
+      else reload();
+    },
+    [reload]
+  );
 
   const checkLogin = useCallback(async () => {
     try {
@@ -101,8 +112,9 @@ export default function App() {
         {error && <div className="page" style={{ marginBottom: 20 }}><Notice>{error}</Notice></div>}
         <Routes>
           <Route path="/" element={<Customers customers={customers} />} />
-          <Route path="/customer/:id" element={<CustomerDetail onChanged={reload} />} />
+          <Route path="/customer/:id" element={<CustomerDetail customers={customers} onChanged={changed} />} />
           <Route path="/upload" element={<BulkUpload customers={customers} onChanged={reload} />} />
+          <Route path="/portal" element={<PortalHelper />} />
           <Route path="/print" element={<Print customers={customers} onChanged={reload} />} />
           <Route path="/bulk" element={<BulkPaste onChanged={reload} />} />
           <Route path="/import" element={<ImportExcel onChanged={reload} />} />

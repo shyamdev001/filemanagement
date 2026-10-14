@@ -4,6 +4,7 @@ import { config, SERVER_DIR } from '../config.js';
 import { getSetting, setSetting } from '../models.js';
 import { parsePanels, parseInverter, solaryaanModel } from './parsers.js';
 import { englishName } from './transliterate.js';
+import { squash } from './dcr.js';
 
 const DEFAULTS = JSON.parse(
   fs.readFileSync(path.join(SERVER_DIR, 'config', 'datasheets.default.json'), 'utf8')
@@ -12,6 +13,11 @@ const DEFAULTS = JSON.parse(
 /** Datasheet rules live in the database so they can be edited from the Settings page. */
 export async function loadDatasheetConfig() {
   const saved = await getSetting('datasheetConfig');
+  if (saved && (saved.dcrVersion || 0) < 1) {
+    const next = learnFromDcrs(saved);
+    await setSetting('datasheetConfig', next);
+    return next;
+  }
   if (saved) return saved;
   await setSetting('datasheetConfig', DEFAULTS);
   return DEFAULTS;
@@ -19,6 +25,31 @@ export async function loadDatasheetConfig() {
 
 export async function saveDatasheetConfig(cfg) {
   await setSetting('datasheetConfig', cfg);
+}
+
+/**
+ * 2026-10-14: the DCR certificates show which modules were really supplied. Rules get the model
+ * codes printed on the DCR, and the defaults follow what the DCRs showed:
+ * every Waaree 540 W was a BI-55 glass-glass bifacial module, the APS 550 W was APSBF bifacial.
+ * Rules the user changed keep their file; only codes and missing rules are added.
+ */
+function learnFromDcrs(cfg) {
+  const byId = new Map(DEFAULTS.rules.map((r) => [r.id, r]));
+  const rules = cfg.rules.map((r) => {
+    const d = byId.get(r.id);
+    if (!d) return r;
+    const out = { ...r, dcr: r.dcr || d.dcr || '' };
+    // Waaree 520–550: the bifacial BI-55 sheet, and it is checked before the Mono PERC sheet.
+    if (r.id === 'waaree-bifacial-550') Object.assign(out, { label: d.label, minWatt: d.minWatt, maxWatt: d.maxWatt });
+    if (r.id === 'aps-550' && r.file === 'APS/Mono-Facial_530W-to-560W_144C.pdf') Object.assign(out, { label: d.label, file: d.file });
+    return out;
+  });
+  for (const d of DEFAULTS.rules) if (!rules.some((r) => r.id === d.id)) rules.push(d);
+  // Same order as the defaults; the user's own rules stay after them.
+  const order = DEFAULTS.rules.map((r) => r.id);
+  const pos = (r) => (order.includes(r.id) ? order.indexOf(r.id) : order.length);
+  rules.sort((a, b) => pos(a) - pos(b));
+  return { ...cfg, rules, dcrVersion: 1 };
 }
 
 let cache = { at: 0, files: [] };
@@ -67,6 +98,25 @@ function matchPanelRule(item, rules) {
   );
 }
 
+/** Codes of a rule ("BI-55, BiN-21") that, printed on a DCR, pick that rule. */
+const dcrCodes = (r) => String(r.dcr || '').split(/[,|]/).map(squash).filter(Boolean);
+
+/**
+ * The rule for one module listed on a DCR: a rule whose code is printed on the DCR wins; otherwise
+ * brand, watt and TOPCon decide, as for the Excel. `guess` when no code confirmed it.
+ */
+function matchDcrRule(item, rules) {
+  const fits = rules.filter((r) => r.kind === 'panel' && r.brand === item.brand && item.watt >= r.minWatt && item.watt <= r.maxWatt);
+  const text = squash(`${item.code} ${item.desc}`);
+  const byCode = fits.find((r) => dcrCodes(r).some((k) => text.includes(k)));
+  if (byCode) return { rule: byCode, guess: false };
+  const typeFits = (r) => r.topcon == null || r.topcon === item.topcon;
+  const rule = fits.find((r) => !dcrCodes(r).length && typeFits(r)) || fits.find(typeFits);
+  return { rule, guess: !!rule };
+}
+
+const describe = (it) => `${brandName(it.brand) || it.code} ${it.watt} W${it.topcon ? ' TOPCon' : ''}`;
+
 /**
  * Work out which documents a customer has and what is still missing.
  * `files` is the set of PDFs that exist in the datasheet folder.
@@ -86,12 +136,37 @@ export function customerStatus(c, cfg, files) {
 
   // 2. Panel datasheet(s).
   // pages: file → "2-3" when only some pages of that PDF belong in the customer file
-  const datasheet = { ok: false, files: [], pages: {}, problems: [], manual: false };
+  const datasheet = { ok: false, files: [], pages: {}, problems: [], notes: [], manual: false, source: 'excel' };
+  const add = (rule, what, into = datasheet) => {
+    if (!rule.file) into.problems.push(`${what}: datasheet not chosen yet (Settings → "${rule.label}")`);
+    else if (!exists(rule.file)) into.problems.push(`${what}: file not found – ${rule.file}`);
+    else if (!into.files.includes(rule.file)) {
+      into.files.push(rule.file);
+      if (rule.pages) into.pages[rule.file] = rule.pages;
+    }
+  };
+  const dcrInfo = c.uploads?.dcr ? c.dcrPanels : null;
+  if (dcrInfo?.read) datasheet.dcr = [...new Set(dcrInfo.items.map((it) => `${it.code} (${it.watt} W)`))];
   if (c.manualDatasheets?.length) {
     datasheet.manual = true;
     datasheet.files = c.manualDatasheets.filter(exists);
     for (const f of c.manualDatasheets) if (!exists(f)) datasheet.problems.push(`File not found: ${f}`);
+  } else if (dcrInfo?.read) {
+    // The DCR lists the modules that were really supplied, so it decides over the Excel text.
+    datasheet.source = 'dcr';
+    for (const it of dcrInfo.items) {
+      const { rule, guess } = matchDcrRule(it, cfg.rules);
+      if (!rule) datasheet.problems.push(`The DCR shows ${describe(it)} (${it.code}): no datasheet rule fits – choose by hand or add a rule`);
+      else {
+        add(rule, describe(it));
+        if (guess) datasheet.notes.push(`${it.code} is not a model code any rule knows; the closest datasheet was used`);
+      }
+    }
+    const excel = parsePanels(c.panelRaw, cfg.panelBrands).filter((p) => p.brand && p.watt);
+    const differs = excel.some((p) => !dcrInfo.items.some((it) => it.brand === p.brand && it.watt === p.watt));
+    if (excel.length && differs) datasheet.notes.push(`Excel says "${c.panelRaw}", the DCR says ${dcrInfo.items.map(describe).join(' + ')}. The DCR was followed.`);
   } else {
+    if (c.uploads?.dcr && dcrInfo && !dcrInfo.read) datasheet.notes.push('The DCR is a scan with no text, so the datasheet comes from the Excel');
     const items = parsePanels(c.panelRaw, cfg.panelBrands);
     if (!items.length) datasheet.problems.push('Panel is blank in Excel');
     // Watt not written in Excel (e.g. just "વારી"): work it out from kW ÷ panel count
@@ -111,12 +186,7 @@ export function customerStatus(c, cfg, files) {
       const rule = matchPanelRule(it, cfg.rules);
       const what = `${brandName(it.brand)} ${it.watt} W${it.topcon ? ' TOPCon' : ''}`;
       if (!rule) datasheet.problems.push(`No datasheet rule for ${what}`);
-      else if (!rule.file) datasheet.problems.push(`${what}: datasheet not chosen yet (Settings → "${rule.label}")`);
-      else if (!exists(rule.file)) datasheet.problems.push(`${what}: file not found – ${rule.file}`);
-      else if (!datasheet.files.includes(rule.file)) {
-        datasheet.files.push(rule.file);
-        if (rule.pages) datasheet.pages[rule.file] = rule.pages;
-      }
+      else add(rule, what);
     }
   }
   datasheet.ok = datasheet.files.length > 0 && !datasheet.problems.length;

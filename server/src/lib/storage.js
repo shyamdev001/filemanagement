@@ -74,4 +74,38 @@ const cloud = {
 
 if (config.cloudinary) cloudinary.config({ ...config.cloudinary, secure: true });
 
-export const storage = config.cloudinary ? cloud : disk;
+const base = config.cloudinary ? cloud : disk;
+
+// Fetching a PDF from the cloud takes a second or two. A copy is kept on this machine, named after
+// the file's fingerprint (version), so a PDF that was replaced elsewhere is never served stale.
+const copyFile = (key, version) => path.join(config.dataDir, 'cache', `${String(version).slice(0, 40)}_${key.replace(/[\\/]/g, '_')}`);
+function keepCopy(key, version, buffer) {
+  try {
+    fs.mkdirSync(path.dirname(copyFile(key, version)), { recursive: true });
+    fs.writeFileSync(copyFile(key, version), buffer);
+  } catch {
+    // a full or read-only disk only costs speed
+  }
+}
+
+export const storage = {
+  where: base.where,
+  /** version: a fingerprint of the content (optional); with it, a local copy is kept. */
+  async put(key, buffer, version) {
+    const result = await base.put(key, buffer);
+    if (base === cloud && version) keepCopy(key, version, buffer);
+    return result;
+  },
+  async get(key, version) {
+    if (base === cloud && version && fs.existsSync(copyFile(key, version))) return fs.readFileSync(copyFile(key, version));
+    const buffer = await base.get(key);
+    if (buffer && base === cloud && version) keepCopy(key, version, buffer);
+    return buffer;
+  },
+  /** Keep a local copy of a PDF that is already in hand. */
+  keep(key, version, buffer) {
+    if (base === cloud && version) keepCopy(key, version, buffer);
+  },
+  remove: (key) => base.remove(key),
+  setAside: (key) => base.setAside(key),
+};

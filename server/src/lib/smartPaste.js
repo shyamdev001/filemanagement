@@ -7,7 +7,9 @@ import { englishName } from './transliterate.js';
  */
 export function parseLine(raw) {
   const line = toAscii(String(raw || '')).trim();
-  const out = { mobile: '', appNo: '', serial: '', name: '' };
+  // names: every cell that reads like a name. A row copied whole from the portal's export has several
+  // (company, consumer, status); the caller picks the one that belongs to a customer.
+  const out = { mobile: '', appNo: '', serial: '', name: '', names: [] };
   if (!line) return null;
   const nameWords = [];
   const gujarati = [];
@@ -20,17 +22,23 @@ export function parseLine(raw) {
       out.mobile = out.mobile || digits.slice(-10);
       continue;
     }
+    const before = nameWords.length;
     for (const tok of c.split(/\s+/)) {
       const t = tok.replace(/^[^\p{L}\p{M}\p{N}+]+|[^\p{L}\p{M}\p{N}]+$/gu, '');
       if (!t) continue;
       const d = t.replace(/\D/g, '');
       if (/^NP-?[A-Z0-9]{3,8}-?\d{5,12}$/i.test(t.replace(/\s/g, ''))) out.appNo = out.appNo || t.toUpperCase();
       else if (/^\+?\d{10,12}$/.test(t) && /^[6-9]\d{9}$/.test(d.slice(-10)) && (d.length === 10 || d.startsWith('91'))) out.mobile = out.mobile || d.slice(-10);
+      // An inverter serial has a letter in it (119117126D00001). A plain run of digits that is not a
+      // mobile number is something else, such as the Discom consumer number in the portal's export.
+      else if (/^\d{6,13}$/.test(t)) continue;
       else if (/^[A-Z0-9]{9,22}$/i.test(t) && d.length >= 6) out.serial = out.serial || t.toUpperCase();
       else if (/[઀-૿]/.test(t)) gujarati.push(t);
       else if (/^[A-Za-z][A-Za-z.']*$/.test(t)) nameWords.push(t.replace(/[.']/g, '').toUpperCase());
     }
+    if (nameWords.length - before >= 2) out.names.push(nameWords.slice(before).join(' '));
   }
+  if (out.names.length > 1) return out; // the caller chooses among them
   out.name = nameWords.length >= 2 ? nameWords.join(' ') : gujarati.length ? englishName(gujarati.join(' ')) : nameWords.join(' ');
   return out;
 }

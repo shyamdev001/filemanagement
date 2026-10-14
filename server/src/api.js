@@ -1,20 +1,23 @@
 import crypto from 'node:crypto';
+import zlib from 'node:zlib';
 import express from 'express';
 import multer from 'multer';
 import mongoose from 'mongoose';
 import { config } from './config.js';
 import fs from 'node:fs';
-import { Customer, Pending, getSetting, setSetting } from './models.js';
+import { Customer, Pending, Setting, getSetting, setSetting } from './models.js';
 import {
   UPLOAD_TYPES,
   uploadKey,
   pendingKey,
   isPdf,
   saveUpload,
+  fileHash,
   extractText,
   detectType,
-  findCustomers,
   matchCustomer,
+  prepareCustomer,
+  hasCustomerMobile,
   applicationNumbers,
   applicantName,
 } from './lib/uploads.js';
@@ -31,7 +34,8 @@ import { payeeHtml, warrantyHtml } from './lib/templates.js';
 import { htmlToPdf, mergePdfs, closeBrowser } from './lib/pdf.js';
 import { englishName } from './lib/transliterate.js';
 import { storage } from './lib/storage.js';
-import { findByName, matchByName, nearNames, nameKeys } from './lib/names.js';
+import { helperKey, PORTAL_ORIGIN } from './portal.js';
+import { findByName, matchByName, nearNames, nameKeys, namesAgree } from './lib/names.js';
 import { parseLine, suggestSerial, usualLength } from './lib/smartPaste.js';
 import { parseInverter } from './lib/parsers.js';
 import { Batch } from './models.js';
@@ -77,14 +81,55 @@ async function statusContext() {
 // englishNameShown: the typed English name, or the one made from the Gujarati name (for search and display).
 const withStatus = (c, ctx) => ({ ...c, englishNameShown: c.englishName || englishName(c.name), status: customerStatus(c, ctx.cfg, ctx.files) });
 
+// The whole list (1,400+ customers with their status) is built once and reused until a customer,
+// the datasheet rules or the datasheet folder changes. Checking for a change is three tiny queries.
+let listCache = { version: '', body: null, gz: null };
+async function listVersion() {
+  const [last, count, rules] = await Promise.all([
+    Customer.findOne({}, { updatedAt: 1 }).sort({ updatedAt: -1 }).lean(),
+    Customer.estimatedDocumentCount(),
+    Setting.findOne({ key: 'datasheetConfig' }, { updatedAt: 1 }).lean(),
+  ]);
+  const files = crypto.createHash('sha1').update(listDatasheetFiles().join('|')).digest('hex').slice(0, 8);
+  return [last?.updatedAt?.getTime() || 0, count, rules?.updatedAt?.getTime() || 0, files].join('-');
+}
+
 api.get(
   '/customers',
   wrap(async (req, res) => {
-    const ctx = await statusContext();
-    const docs = await Customer.find({}, { extra: 0 }).sort({ sheet: 1, excelRow: 1 }).lean();
-    res.json({ customers: docs.map((c) => withStatus(c, ctx)) });
+    const version = await listVersion();
+    if (listCache.version !== version) {
+      const ctx = await statusContext();
+      const docs = await Customer.find({}, { extra: 0 }).sort({ sheet: 1, excelRow: 1 }).lean();
+      const body = Buffer.from(JSON.stringify({ customers: docs.map((c) => withStatus(c, ctx)) }));
+      listCache = { version, body, gz: zlib.gzipSync(body, { level: 6 }) };
+    }
+    const tag = `"${version}"`;
+    res.setHeader('ETag', tag);
+    res.setHeader('Cache-Control', 'private, no-cache');
+    if (req.headers['if-none-match'] === tag) return res.status(304).end(); // the browser already has this list
+    res.setHeader('Content-Type', 'application/json; charset=utf-8');
+    if (/\bgzip\b/.test(req.headers['accept-encoding'] || '')) {
+      res.setHeader('Content-Encoding', 'gzip');
+      return res.end(listCache.gz);
+    }
+    res.end(listCache.body);
   })
 );
+
+/** A customer's uploaded PDF. A local copy is used when there is one (see storage.js). */
+async function getUpload(c, type) {
+  const meta = c.uploads?.[type];
+  if (!meta) return null;
+  const pdf = await storage.get(uploadKey(c._id, type), meta.hash);
+  if (pdf && !meta.hash) {
+    // uploaded before fingerprints existed: add one now so the next read is instant
+    meta.hash = fileHash(pdf);
+    await Customer.updateOne({ _id: c._id }, { $set: { [`uploads.${type}.hash`]: meta.hash } }, { timestamps: false });
+    storage.keep(uploadKey(c._id, type), meta.hash, pdf);
+  }
+  return pdf;
+}
 
 async function findCustomer(req, res) {
   if (!mongoose.isValidObjectId(req.params.id)) {
@@ -100,9 +145,32 @@ api.get(
   '/customers/:id',
   wrap(async (req, res) => {
     const c = await findCustomer(req, res);
-    if (c) res.json({ customer: withStatus(c, await statusContext()) });
+    if (!c) return;
+    const customer = withStatus(c, await statusContext());
+    res.json({ customer });
+    getReady(c, customer.status);
   })
 );
+
+// Someone has opened this customer: prepare their documents in the background, so that Preview
+// and "Open customer file" answer at once. Failures here are silent; the real request reports them.
+const gettingReady = new Set();
+function getReady(c, st) {
+  const id = String(c._id);
+  if (gettingReady.has(id)) return;
+  gettingReady.add(id);
+  (async () => {
+    if (config.hosted) {
+      // a small server: only fetch the uploaded PDFs, one after the other
+      for (const type of Object.keys(UPLOAD_TYPES)) await getUpload(c, type);
+    } else {
+      const parts = await buildCustomerFile(c, st);
+      if (parts.length) await mergePdfs(parts);
+    }
+  })()
+    .catch(() => {})
+    .finally(() => gettingReady.delete(id));
+}
 
 api.patch(
   '/customers/:id',
@@ -163,19 +231,17 @@ api.get(
 
 /** The customer's documents in print order. withUploads=false leaves out DCR / Agreement / FL. */
 export async function buildCustomerFile(c, st, withUploads = true) {
+  // Everything is started together (two documents to make, three PDFs to fetch) and joined in print order.
   const parts = [];
-  if (st.payee.ok) parts.push(await htmlToPdf(payeeHtml(c)));
+  if (st.payee.ok) parts.push(htmlToPdf(payeeHtml(c)));
   const sheet = (f, pages) => (datasheetPath(f) ? { file: datasheetPath(f), pages: pages[f] } : null);
   for (const f of st.datasheet.files) parts.push(sheet(f, st.datasheet.pages));
   if (st.inverter.type === 'warranty' && st.inverter.ok) {
-    parts.push(await htmlToPdf(warrantyHtml({ ...c, englishName: st.inverter.englishName }, st.inverter.model), { landscape: true }));
+    parts.push(htmlToPdf(warrantyHtml({ ...c, englishName: st.inverter.englishName }, st.inverter.model), { landscape: true }));
   }
   for (const f of st.inverter.files) parts.push(sheet(f, st.inverter.pages));
-  for (const type of withUploads ? Object.keys(UPLOAD_TYPES) : []) {
-    const pdf = c.uploads?.[type] && (await storage.get(uploadKey(c._id, type)));
-    if (pdf) parts.push(pdf);
-  }
-  return parts.filter(Boolean);
+  for (const type of withUploads ? Object.keys(UPLOAD_TYPES) : []) parts.push(getUpload(c, type));
+  return (await Promise.all(parts)).filter(Boolean);
 }
 
 api.get(
@@ -383,6 +449,7 @@ api.post(
       if (c.applicationNumber) byAppNo.set(c.applicationNumber, c);
       c.shownName = c.englishName || englishName(c.name);
       c.keys = nameKeys(c.shownName);
+      c.ownKeys = nameKeys(englishName(c.name));
       c.solaryaan = parseInverter(c.inverterRaw, cfg.inverterBrands).brand === 'solaryaan';
     }
     const solaryaan = all.filter((c) => c.solaryaan);
@@ -398,6 +465,8 @@ api.post(
       const row = { line, raw, values: { serial: p.serial, appNo: p.appNo, name: p.name, mobile: p.mobile } };
       const needs = (reason, extra = {}) => rows.push({ ...row, status: 'needs', reason, ...extra });
       const pool = p.serial ? solaryaan : all;
+      // Several name-like cells on the line (a whole row from the portal export): use the one that is a customer.
+      if (!p.name && p.names.length > 1) p.name = p.names.find((n) => matchByName(n, all).hits.length === 1) || '';
 
       // ---- who is it? mobile number, then application number, then name ----
       let c = null;
@@ -408,6 +477,10 @@ api.post(
         if (hits.length > 1 && p.name) {
           const narrowed = matchByName(p.name, hits).hits;
           if (narrowed.length === 1) hits = narrowed;
+        }
+        if (hits.length === 1 && p.name && !namesAgree(p.name, hits[0].ownKeys) && !namesAgree(p.name, hits[0].keys)) {
+          needs(`The mobile number ${p.mobile} is ${hits[0].name}'s in your Excel, but this line names ${p.name}`, { suggestions: nearNames(p.name, pool).map(card) });
+          continue;
         }
         if (hits.length === 1) [c, how] = [hits[0], 'mobile number'];
         else if (hits.length > 1) {
@@ -494,6 +567,20 @@ api.post(
   })
 );
 
+// ---------- portal helper: what the page needs to build the bookmark ----------
+api.get(
+  '/portal-setup',
+  wrap(async (req, res) =>
+    res.json({
+      key: await helperKey(),
+      portal: PORTAL_ORIGIN,
+      // The address of this server, for the bookmark. On a PC it is always the server's own port, even when
+      // the page was opened through the developer screens (port 5173), which cannot serve the helper.
+      appUrl: config.hosted ? req.protocol + '://' + req.get('host') : 'http://localhost:' + config.port,
+    })
+  )
+);
+
 // ---------- datasheet settings ----------
 api.get(
   '/settings/datasheets',
@@ -521,6 +608,8 @@ api.put(
         rule.topcon = r.topcon === true || r.topcon === false ? r.topcon : null;
         rule.minWatt = Number(r.minWatt);
         rule.maxWatt = Number(r.maxWatt);
+        // Model codes printed on DCR certificates that mean this datasheet, e.g. "BI-55, BiN-21".
+        rule.dcr = clean(r.dcr);
         if (!(rule.minWatt > 0) || !(rule.maxWatt >= rule.minWatt)) {
           return res.status(400).json({ error: `Check the watt range of "${rule.label}"` });
         }
@@ -553,13 +642,15 @@ const fixName = (file) => {
 const MATCH_FIELDS = { name: 1, sheet: 1, village: 1, mobile: 1, mobiles: 1, englishName: 1, uploads: 1, applicationNumber: 1 };
 async function customersForMatching() {
   const customers = await Customer.find({}, MATCH_FIELDS).lean();
-  // Portal PDFs carry the English name; fall back to the one made from the Gujarati name.
   for (const c of customers) {
     c.typedName = c.englishName;
-    c.englishName = c.englishName || englishName(c.name);
+    // Portal PDFs carry the English name; fall back to the one made from the Gujarati name.
+    prepareCustomer(c, c.englishName || englishName(c.name), englishName(c.village), englishName(c.name));
   }
   return customers;
 }
+
+const brief = (c) => ({ id: String(c._id), name: c.name, english: c.englishName, village: c.village, mobile: c.mobile });
 
 /** Remember a customer's application number (never replaces one that is already there). */
 async function learnNumber(c, appNo) {
@@ -577,7 +668,8 @@ async function learnName(c, flText) {
   const name = applicantName(flText);
   if (!name || c.typedName) return false;
   await Customer.updateOne({ _id: c._id }, { $set: { englishName: name } });
-  c.englishName = c.typedName = name;
+  c.typedName = name;
+  if (c.keys) prepareCustomer(c, name, englishName(c.village));
   return true;
 }
 
@@ -603,32 +695,76 @@ async function learnFromStoredUploads(customers) {
   }
 }
 
+/** Is this exact PDF already stored for the customer? (Old uploads have no fingerprint: compare the files.) */
+async function sameAsStored(c, type, hash) {
+  const have = c.uploads?.[type];
+  if (!have) return false;
+  if (have.hash) return have.hash === hash;
+  const stored = await storage.get(uploadKey(c._id, type));
+  return !!stored && fileHash(stored) === hash;
+}
+
 /**
- * PDFs in "Waiting for you" are matched again whenever something new has been learned (an
- * application number or the portal's spelling of a name), and filed by themselves if they now fit
+ * Decide what to do with one PDF, using every clue in it, and do it when the answer is certain.
+ * Returns { result: 'saved' | 'same' | 'pending', … }. 'pending' means a person must decide; the
+ * reason and the closest customers are returned for the "Waiting for you" list.
+ */
+async function placePdf({ name, buffer, text, type }, customers) {
+  const m = matchCustomer(name, text, customers);
+  const hash = fileHash(buffer);
+  const c = m.matches.length === 1 && !m.conflict ? m.matches[0] : null;
+  const base = { name, type, appNo: m.appNo };
+
+  if (c && type && (await sameAsStored(c, type, hash))) return { ...base, result: 'same', customer: c, how: m.how };
+
+  let reason = '';
+  if (m.conflict) reason = m.conflict;
+  else if (m.weak) reason = m.weak;
+  else if (!m.matches.length) {
+    if (!text.trim()) reason = 'This PDF is a scan: there is no text in it to read. Choose the customer';
+    else if (m.docName) reason = m.suggestions.length ? `No customer is named ${m.docName}. Is it one of these?` : `No customer is named ${m.docName}`;
+    else if (m.appNo) reason = `No customer is known yet for application number ${m.appNo}. Upload that customer's FL and this will be filed by itself`;
+    else reason = 'No customer name, mobile number or application number could be found in this PDF';
+  } else if (m.matches.length > 1) reason = `${m.matches.length} customers fit this ${m.how}, and nothing else in the PDF tells them apart`;
+  else if (!type) reason = 'Could not tell whether this is the DCR, the Agreement or the FL';
+  else if (c.uploads?.[type]) reason = `${c.name} already has a different ${UPLOAD_TYPES[type]}. Replace it?`;
+
+  if (reason) return { ...base, result: 'pending', reason, candidates: (m.matches.length ? m.matches : m.suggestions).slice(0, 5) };
+
+  await saveUpload(c._id, type, buffer);
+  return { ...base, result: 'saved', customer: c, how: m.how, note: m.note || '', certain: !!m.certain, hash };
+}
+
+/** Record a PDF that placePdf saved, and learn from it. */
+async function recordSaved(placed, meta, text) {
+  const c = placed.customer;
+  const full = { ...meta, hash: placed.hash, uploadedAt: new Date() };
+  await Customer.updateOne({ _id: c._id }, { $set: { [`uploads.${placed.type}`]: full } });
+  c.uploads = { ...(c.uploads || {}), [placed.type]: full };
+  if (placed.certain) {
+    await learnNumber(c, placed.appNo);
+    if (placed.type === 'fl') await learnName(c, text);
+  }
+}
+
+/**
+ * PDFs in "Waiting for you" are tried again whenever something new has been learned (an
+ * application number, the portal's spelling of a name), and filed by themselves if they now fit
  * exactly one customer. This is what lets the Agreement and DCR be dropped before the FL.
  */
 async function resolvePending(customers) {
   const filed = [];
   for (const p of await Pending.find()) {
-    const buffer = await storage.get(pendingKey(p.storedName));
+    const buffer = await storage.get(pendingKey(p.storedName), 'w');
     if (!buffer) continue;
     const text = await extractText(buffer);
     const type = p.detectedType || detectType(p.originalName, text);
-    const m = matchCustomer(p.originalName, text, customers);
-    if (m.conflict || m.matches.length !== 1 || !UPLOAD_TYPES[type] || m.matches[0].uploads?.[type]) continue;
-    const c = m.matches[0];
-    await saveUpload(c._id, type, buffer);
-    const meta = { originalName: p.originalName, size: p.size, uploadedAt: new Date() };
-    await Customer.updateOne({ _id: c._id }, { $set: { [`uploads.${type}`]: meta } });
-    c.uploads = { ...(c.uploads || {}), [type]: meta };
-    if (m.certain) {
-      await learnNumber(c, m.appNo);
-      if (type === 'fl') await learnName(c, text);
-    }
+    const placed = await placePdf({ name: p.originalName, buffer, text, type }, customers);
+    if (placed.result === 'pending') continue;
+    if (placed.result === 'saved') await recordSaved(placed, { originalName: p.originalName, size: p.size }, text);
     await storage.remove(pendingKey(p.storedName));
     await p.deleteOne();
-    filed.push({ name: p.originalName, type, customer: { id: String(c._id), name: c.name, mobile: c.mobile } });
+    filed.push({ name: p.originalName, type, result: placed.result, how: placed.how, customer: brief(placed.customer) });
   }
   return filed;
 }
@@ -643,7 +779,7 @@ api.post(
     if (!UPLOAD_TYPES[type]) return res.status(400).json({ error: 'Unknown document type' });
     if (!req.file || !isPdf(req.file.buffer)) return res.status(400).json({ error: 'Please choose a PDF file' });
     await saveUpload(c._id, type, req.file.buffer);
-    await Customer.updateOne({ _id: c._id }, { $set: { [`uploads.${type}`]: uploadMeta(fixName(req.file)) } });
+    await Customer.updateOne({ _id: c._id }, { $set: { [`uploads.${type}`]: { ...uploadMeta(fixName(req.file)), hash: fileHash(req.file.buffer) } } });
 
     // A person chose this customer, so the PDF's application number can be trusted for them.
     const text = await extractText(req.file.buffer);
@@ -677,14 +813,15 @@ api.get(
   wrap(async (req, res) => {
     const c = await findCustomer(req, res);
     if (!c) return;
-    const pdf = UPLOAD_TYPES[req.params.type] && (await storage.get(uploadKey(c._id, req.params.type)));
+    const pdf = UPLOAD_TYPES[req.params.type] && (await getUpload(c, req.params.type));
     if (!pdf) return res.status(404).json({ error: 'This PDF could not be found. Upload it again.' });
     res.setHeader('Content-Type', 'application/pdf');
     res.send(pdf);
   })
 );
 
-// Many PDFs at once: place each one automatically, or queue it for a person to place.
+// Many PDFs at once. Every PDF is read, every clue cross-checked, and whatever is certain is filed.
+// Only the PDFs the app cannot settle are left for a person, each with the reason and its best guesses.
 api.post(
   '/uploads/bulk',
   upload.array('files', 200),
@@ -693,63 +830,60 @@ api.post(
     await learnFromStoredUploads(customers);
 
     // Read everything first, then handle the PDFs that carry a mobile number (the FLs) before
-    // the rest, so their application numbers are known when the Agreement and DCR are placed.
+    // the rest, so their application numbers and names are known when the others are placed.
     const items = [];
+    const seen = new Set();
     for (const [index, file] of (req.files || []).map(fixName).entries()) {
       const name = file.originalname;
       if (!isPdf(file.buffer)) {
-        items.push({ index, name, rejected: true });
+        items.push({ index, name, skip: 'rejected', reason: 'Not a PDF file' });
         continue;
       }
+      const hash = fileHash(file.buffer);
+      if (seen.has(hash)) {
+        items.push({ index, name, skip: 'same', reason: 'The same PDF is in this upload twice' });
+        continue;
+      }
+      seen.add(hash);
       const text = await extractText(file.buffer);
-      const first = findCustomers(name, text, customers);
-      items.push({ index, name, file, text, type: detectType(name, text), hasMobile: first.how === 'mobile number' && first.matches.length > 0 });
+      items.push({ index, name, file, text, type: detectType(name, text), first: hasCustomerMobile(name, text, customers) });
     }
-    items.sort((a, b) => Number(!!b.hasMobile) - Number(!!a.hasMobile) || a.index - b.index);
+    items.sort((a, b) => Number(!!b.first) - Number(!!a.first) || a.index - b.index);
 
     const results = [];
+    const touched = new Map();
     for (const it of items) {
-      const { index, name, file, type } = it;
-      if (it.rejected) {
-        results.push({ index, name, result: 'rejected', reason: 'Not a PDF file' });
+      const { index, name, file, type, text } = it;
+      if (it.skip) {
+        results.push({ index, name, result: it.skip, reason: it.reason });
         continue;
       }
-      const m = matchCustomer(name, it.text, customers);
-
-      let reason = '';
-      if (m.conflict) reason = m.conflict;
-      else if (!m.matches.length) reason = m.appNo ? `No customer is known yet for application number ${m.appNo}. Upload that customer's FL and this will be filed by itself` : 'No application number, mobile number or English name of a customer found in this PDF';
-      else if (m.matches.length > 1) reason = `${m.matches.length} customers fit (same ${m.how})`;
-      else if (!type) reason = 'Could not tell if this is the DCR, Agreement or FL';
-      else if (m.matches[0].uploads?.[type]) reason = `This customer already has a ${UPLOAD_TYPES[type]}`;
-
-      if (!reason) {
-        const c = m.matches[0];
-        await saveUpload(c._id, type, file.buffer);
-        const meta = uploadMeta(file);
-        await Customer.updateOne({ _id: c._id }, { $set: { [`uploads.${type}`]: meta } });
-        c.uploads = { ...(c.uploads || {}), [type]: meta };
-        if (m.certain) {
-          await learnNumber(c, m.appNo);
-          if (type === 'fl') await learnName(c, it.text);
-        }
-        results.push({ index, name, result: 'saved', type, customer: { id: String(c._id), name: c.name, mobile: c.mobile }, how: m.how });
+      const placed = await placePdf({ name, buffer: file.buffer, text, type }, customers);
+      if (placed.result === 'pending') {
+        const storedName = `${crypto.randomUUID()}.pdf`;
+        await storage.put(pendingKey(storedName), file.buffer, 'w');
+        await Pending.create({ originalName: name, storedName, size: file.size, detectedType: type || '', applicationNumber: placed.appNo, candidates: placed.candidates.map((c) => c._id), reason: placed.reason });
+        results.push({ index, name, result: 'pending', type, reason: placed.reason });
         continue;
       }
-      const storedName = `${crypto.randomUUID()}.pdf`;
-      await storage.put(pendingKey(storedName), file.buffer);
-      await Pending.create({ originalName: name, storedName, size: file.size, detectedType: type || '', applicationNumber: m.appNo, candidates: m.matches.slice(0, 5).map((c) => c._id), reason });
-      results.push({ index, name, result: 'pending', type, reason });
+      if (placed.result === 'saved') await recordSaved(placed, { originalName: name, size: file.size }, text);
+      touched.set(String(placed.customer._id), placed.customer);
+      results.push({ index, name, result: placed.result, type, customer: brief(placed.customer), how: placed.how, note: placed.note || '' });
     }
 
     // Anything that was waiting (from this upload or an earlier one) and can now be placed.
     const alsoFiled = await resolvePending(customers);
-    const done = new Set(alsoFiled.map((f) => f.name));
+    for (const f of alsoFiled) {
+      const c = customers.find((x) => String(x._id) === f.customer.id);
+      if (c) touched.set(f.customer.id, c);
+    }
+    const done = new Map(alsoFiled.map((f) => [f.name, f]));
+
     res.json({
-      results: results
-        .sort((a, b) => a.index - b.index)
-        .map((r) => (r.result === 'pending' && done.has(r.name) ? { ...alsoFiled.find((f) => f.name === r.name), result: 'saved', how: 'application number' } : r)),
+      results: results.sort((a, b) => a.index - b.index).map((r) => (r.result === 'pending' && done.has(r.name) ? { ...r, ...done.get(r.name), reason: '' } : r)),
       alsoFiled: alsoFiled.filter((f) => !results.some((r) => r.name === f.name)),
+      // For every customer this upload touched: which of the three documents they now have.
+      customers: [...touched.values()].map((c) => ({ ...brief(c), has: Object.fromEntries(Object.keys(UPLOAD_TYPES).map((t) => [t, !!c.uploads?.[t]])) })),
     });
   })
 );
@@ -773,7 +907,7 @@ api.get(
   wrap(async (req, res) => {
     const p = await findPending(req, res);
     if (!p) return;
-    const pdf = await storage.get(pendingKey(p.storedName));
+    const pdf = await storage.get(pendingKey(p.storedName), 'w');
     if (!pdf) return res.status(404).json({ error: 'This PDF could not be found. Upload it again.' });
     res.setHeader('Content-Type', 'application/pdf');
     res.send(pdf);
@@ -789,10 +923,10 @@ api.post(
     if (!UPLOAD_TYPES[type]) return res.status(400).json({ error: 'Choose which document this is' });
     const c = mongoose.isValidObjectId(customerId) ? await Customer.findById(customerId).lean() : null;
     if (!c) return res.status(400).json({ error: 'Choose the customer' });
-    const buffer = await storage.get(pendingKey(p.storedName));
+    const buffer = await storage.get(pendingKey(p.storedName), 'w');
     if (!buffer) return res.status(404).json({ error: 'This PDF could not be found. Upload it again.' });
     await saveUpload(c._id, type, buffer);
-    await Customer.updateOne({ _id: c._id }, { $set: { [`uploads.${type}`]: { originalName: p.originalName, size: p.size, uploadedAt: new Date() } } });
+    await Customer.updateOne({ _id: c._id }, { $set: { [`uploads.${type}`]: { originalName: p.originalName, size: p.size, uploadedAt: new Date(), hash: fileHash(buffer) } } });
     const gotName = type === 'fl' && (await learnName({ _id: c._id, typedName: c.englishName }, await extractText(buffer)));
     await storage.remove(pendingKey(p.storedName));
     const appNo = p.applicationNumber;
