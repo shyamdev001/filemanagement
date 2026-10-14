@@ -231,6 +231,15 @@ export function customerStatus(c, cfg, files) {
   const agreement = uploaded('agreement', 'Model Agreement');
   const fl = uploaded('fl', 'Feasibility Letter');
 
+  // Optional: a PDF in the app (printed at the end of the file) or a paper copy ticked by hand.
+  // Neither is needed for "Ready".
+  const optional = (type, ticked) => {
+    const u = c.uploads?.[type];
+    return { ok: true, optional: true, uploaded: !!u, ticked: !!ticked, inFile: !!u || !!ticked, problems: [], originalName: u?.originalName, uploadedAt: u?.uploadedAt };
+  };
+  const bill = optional('bill', c.billAttached);
+  const insurance = optional('insurance', c.insuranceAttached);
+
   const generated = payee.ok && datasheet.ok && inverter.ok;
-  return { payee, datasheet, inverter, dcr, agreement, fl, generated, ready: generated && dcr.ok && agreement.ok && fl.ok };
+  return { payee, datasheet, inverter, dcr, agreement, fl, bill, insurance, generated, ready: generated && dcr.ok && agreement.ok && fl.ok };
 }

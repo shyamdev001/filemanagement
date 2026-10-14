@@ -22,16 +22,23 @@ const UPLOADS = [
   { type: 'agreement', en: 'Model Agreement', gu: 'મોડલ એગ્રીમેન્ટ' },
   { type: 'fl', en: 'Feasibility Letter (FL)', gu: 'ફિઝિબિલિટી લેટર' },
 ];
+// Optional: printed at the end of the file when uploaded; the file is Ready without them.
+const OPTIONAL = [
+  { type: 'bill', en: 'Electricity bill', gu: 'લાઈટ બીલ', optional: true },
+  { type: 'insurance', en: 'Insurance policy', gu: 'વીમા પોલિસી', optional: true },
+];
 
 /** One uploaded document: drop a PDF on the row, or choose it. */
 function UploadSlot({ n, slot, doc, customerId, stamp, onDone, onError }) {
   const [busy, setBusy] = useState(false);
   const [over, setOver] = useState(false);
   const url = `/customers/${customerId}/uploads/${slot.type}`;
+  const has = slot.optional ? doc.uploaded : doc.ok;
 
   const send = async (file) => {
     if (!file) return;
-    if (!file.name.toLowerCase().endsWith('.pdf')) return onError('Please choose a PDF file.');
+    const ok = slot.optional ? /\.(pdf|jpe?g|png)$/i.test(file.name) : file.name.toLowerCase().endsWith('.pdf');
+    if (!ok) return onError(slot.optional ? 'Please choose a PDF or a photo (JPG / PNG).' : 'Please choose a PDF file.');
     setBusy(true);
     try {
       const body = new FormData();
@@ -55,29 +62,36 @@ function UploadSlot({ n, slot, doc, customerId, stamp, onDone, onError }) {
 
   return (
     <div
-      className={`doc ${doc.ok ? 'ok' : 'no'}${over ? ' over' : ''}`}
+      className={`doc ${has ? 'ok' : slot.optional ? '' : 'no'}${over ? ' over' : ''}`}
       onDragOver={(e) => { e.preventDefault(); setOver(true); }}
       onDragLeave={() => setOver(false)}
       onDrop={(e) => { e.preventDefault(); setOver(false); send(e.dataTransfer.files[0]); }}
     >
       <div className="doc-n">{n}</div>
       <div className="doc-main">
-        <div className="doc-title"><h3><T en={slot.en} gu={slot.gu} /></h3><DocStatus doc={doc} /></div>
+        <div className="doc-title">
+          <h3><T en={slot.en} gu={slot.gu} /></h3>
+          {slot.optional && !has
+            ? <span className="pill">{doc.ticked ? 'Paper copy ticked' : 'Optional'}</span>
+            : <DocStatus doc={doc} />}
+        </div>
         <span className="hint">
           {busy
             ? 'Uploading…'
-            : doc.ok
-              ? `${doc.originalName} · uploaded ${new Date(doc.uploadedAt).toLocaleDateString('en-IN')}`
-              : 'Drag the PDF from the portal onto this row, or choose it. Always the original signed copy.'}
+            : has
+              ? `${doc.originalName} · uploaded ${new Date(doc.uploadedAt).toLocaleDateString('en-IN')}${slot.optional ? ' · printed at the end of the file' : ''}`
+              : slot.optional
+                ? 'Optional. Drop a PDF or a photo here and it is printed at the end of the customer file. The file is Ready without it.'
+                : 'Drag the PDF from the portal onto this row, or choose it. Always the original signed copy.'}
         </span>
       </div>
       <div className="doc-side">
-        {doc.ok && <a className="btn small" href={`/api${url}?t=${stamp}`} target="_blank" rel="noreferrer"><Eye size={15} /> Preview</a>}
-        <label className={doc.ok ? 'btn small' : 'btn small primary'} aria-disabled={busy}>
-          <Upload size={15} /> {doc.ok ? 'Replace' : 'Upload PDF'}
-          <input type="file" accept=".pdf,application/pdf" hidden disabled={busy} onChange={(e) => { send(e.target.files[0]); e.target.value = ''; }} />
+        {has && <a className="btn small" href={`/api${url}?t=${stamp}`} target="_blank" rel="noreferrer"><Eye size={15} /> Preview</a>}
+        <label className={has ? 'btn small' : slot.optional ? 'btn small' : 'btn small primary'} aria-disabled={busy}>
+          <Upload size={15} /> {has ? 'Replace' : slot.optional ? 'Upload' : 'Upload PDF'}
+          <input type="file" accept={slot.optional ? '.pdf,application/pdf,.jpg,.jpeg,.png,image/jpeg,image/png' : '.pdf,application/pdf'} hidden disabled={busy} onChange={(e) => { send(e.target.files[0]); e.target.value = ''; }} />
         </label>
-        {doc.ok && <button className="btn quiet small" aria-label={`Remove ${slot.en}`} title="Remove" onClick={remove}><Trash2 size={15} /></button>}
+        {has && <button className="btn quiet small" aria-label={`Remove ${slot.en}`} title="Remove" onClick={remove}><Trash2 size={15} /></button>}
       </div>
     </div>
   );
@@ -248,7 +262,7 @@ export default function CustomerDetail({ customers, onChanged }) {
             </div>
           </div>
 
-          {UPLOADS.map((slot, i) => (
+          {[...UPLOADS, ...OPTIONAL].map((slot, i) => (
             <UploadSlot
               key={slot.type}
               n={i + 4}
@@ -325,11 +339,11 @@ export default function CustomerDetail({ customers, onChanged }) {
               </label>
               <label className="check">
                 <input type="checkbox" checked={!!c.billAttached} onChange={(e) => save({ billAttached: e.target.checked })} />
-                <span><T en="Bill is in the file" gu="બીલ ફાઈલમાં છે" /></span>
+                <span><T en="Paper bill added by hand" gu="બીલ હાથથી ફાઈલમાં મૂક્યું" /></span>
               </label>
               <label className="check">
                 <input type="checkbox" checked={!!c.insuranceAttached} onChange={(e) => save({ insuranceAttached: e.target.checked })} />
-                <span><T en="Insurance policy is in the file" gu="વીમા પોલિસી ફાઈલમાં છે" /></span>
+                <span><T en="Paper insurance policy added by hand" gu="વીમા પોલિસી હાથથી ફાઈલમાં મૂકી" /></span>
               </label>
             </div>
           </section>

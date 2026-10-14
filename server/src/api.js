@@ -8,6 +8,10 @@ import fs from 'node:fs';
 import { Customer, Pending, Setting, getSetting, setSetting } from './models.js';
 import {
   UPLOAD_TYPES,
+  OPTIONAL_UPLOADS,
+  ALL_UPLOADS,
+  isImage,
+  imageToPdf,
   uploadKey,
   pendingKey,
   isPdf,
@@ -162,7 +166,7 @@ function getReady(c, st) {
   (async () => {
     if (config.hosted) {
       // a small server: only fetch the uploaded PDFs, one after the other
-      for (const type of Object.keys(UPLOAD_TYPES)) await getUpload(c, type);
+      for (const type of Object.keys(ALL_UPLOADS)) await getUpload(c, type);
     } else {
       const parts = await buildCustomerFile(c, st);
       if (parts.length) await mergePdfs(parts);
@@ -229,7 +233,8 @@ api.get(
   })
 );
 
-/** The customer's documents in print order. withUploads=false leaves out DCR / Agreement / FL. */
+/** The customer's documents in print order, then the bill and insurance policy when uploaded.
+ * withUploads=false leaves out every uploaded PDF. */
 export async function buildCustomerFile(c, st, withUploads = true) {
   // Everything is started together (two documents to make, three PDFs to fetch) and joined in print order.
   const parts = [];
@@ -240,7 +245,7 @@ export async function buildCustomerFile(c, st, withUploads = true) {
     parts.push(htmlToPdf(warrantyHtml({ ...c, englishName: st.inverter.englishName }, st.inverter.model), { landscape: true }));
   }
   for (const f of st.inverter.files) parts.push(sheet(f, st.inverter.pages));
-  for (const type of withUploads ? Object.keys(UPLOAD_TYPES) : []) parts.push(getUpload(c, type));
+  for (const type of withUploads ? Object.keys(ALL_UPLOADS) : []) parts.push(getUpload(c, type));
   return (await Promise.all(parts)).filter(Boolean);
 }
 
@@ -639,11 +644,12 @@ const fixName = (file) => {
 };
 
 // Fields the matching needs for every customer.
-const MATCH_FIELDS = { name: 1, sheet: 1, village: 1, mobile: 1, mobiles: 1, englishName: 1, uploads: 1, applicationNumber: 1 };
+const MATCH_FIELDS = { name: 1, sheet: 1, village: 1, mobile: 1, mobiles: 1, englishName: 1, uploads: 1, applicationNumber: 1, 'portal.consumerNo': 1 };
 async function customersForMatching() {
   const customers = await Customer.find({}, MATCH_FIELDS).lean();
   for (const c of customers) {
     c.typedName = c.englishName;
+    c.consumerNo = String(c.portal?.consumerNo || '').replace(/\D/g, '');
     // Portal PDFs carry the English name; fall back to the one made from the Gujarati name.
     prepareCustomer(c, c.englishName || englishName(c.name), englishName(c.village), englishName(c.name));
   }
@@ -710,7 +716,7 @@ async function sameAsStored(c, type, hash) {
  * reason and the closest customers are returned for the "Waiting for you" list.
  */
 async function placePdf({ name, buffer, text, type }, customers) {
-  const m = matchCustomer(name, text, customers);
+  const m = matchCustomer(name, text, customers, type);
   const hash = fileHash(buffer);
   const c = m.matches.length === 1 && !m.conflict ? m.matches[0] : null;
   const base = { name, type, appNo: m.appNo };
@@ -721,13 +727,13 @@ async function placePdf({ name, buffer, text, type }, customers) {
   if (m.conflict) reason = m.conflict;
   else if (m.weak) reason = m.weak;
   else if (!m.matches.length) {
-    if (!text.trim()) reason = 'This PDF is a scan: there is no text in it to read. Choose the customer';
+    if (!text.trim()) reason = 'This is a scan or a photo: there is no text in it to read. Choose the customer';
     else if (m.docName) reason = m.suggestions.length ? `No customer is named ${m.docName}. Is it one of these?` : `No customer is named ${m.docName}`;
     else if (m.appNo) reason = `No customer is known yet for application number ${m.appNo}. Upload that customer's FL and this will be filed by itself`;
     else reason = 'No customer name, mobile number or application number could be found in this PDF';
   } else if (m.matches.length > 1) reason = `${m.matches.length} customers fit this ${m.how}, and nothing else in the PDF tells them apart`;
-  else if (!type) reason = 'Could not tell whether this is the DCR, the Agreement or the FL';
-  else if (c.uploads?.[type]) reason = `${c.name} already has a different ${UPLOAD_TYPES[type]}. Replace it?`;
+  else if (!type) reason = 'Could not tell which document this is (DCR, Agreement, FL, bill or insurance policy)';
+  else if (c.uploads?.[type]) reason = `${c.name} already has a different ${ALL_UPLOADS[type]}. Replace it?`;
 
   if (reason) return { ...base, result: 'pending', reason, candidates: (m.matches.length ? m.matches : m.suggestions).slice(0, 5) };
 
@@ -741,7 +747,8 @@ async function recordSaved(placed, meta, text) {
   const full = { ...meta, hash: placed.hash, uploadedAt: new Date() };
   await Customer.updateOne({ _id: c._id }, { $set: { [`uploads.${placed.type}`]: full } });
   c.uploads = { ...(c.uploads || {}), [placed.type]: full };
-  if (placed.certain) {
+  // A bill or policy never teaches an application number or a portal name.
+  if (placed.certain && UPLOAD_TYPES[placed.type]) {
     await learnNumber(c, placed.appNo);
     if (placed.type === 'fl') await learnName(c, text);
   }
@@ -776,10 +783,21 @@ api.post(
     const c = await findCustomer(req, res);
     if (!c) return;
     const { type } = req.params;
-    if (!UPLOAD_TYPES[type]) return res.status(400).json({ error: 'Unknown document type' });
-    if (!req.file || !isPdf(req.file.buffer)) return res.status(400).json({ error: 'Please choose a PDF file' });
+    if (!ALL_UPLOADS[type]) return res.status(400).json({ error: 'Unknown document type' });
+    // The bill and policy may also be a photo (JPG / PNG); it is kept as a one-page PDF.
+    if (OPTIONAL_UPLOADS[type] && req.file && isImage(req.file.buffer)) {
+      req.file.buffer = await imageToPdf(req.file.buffer);
+      req.file.size = req.file.buffer.length;
+      req.file.originalname = req.file.originalname.replace(/\.(jpe?g|png)$/i, '') + '.pdf';
+    }
+    if (!req.file || !isPdf(req.file.buffer)) return res.status(400).json({ error: OPTIONAL_UPLOADS[type] ? 'Please choose a PDF or a photo (JPG / PNG)' : 'Please choose a PDF file' });
     await saveUpload(c._id, type, req.file.buffer);
     await Customer.updateOne({ _id: c._id }, { $set: { [`uploads.${type}`]: { ...uploadMeta(fixName(req.file)), hash: fileHash(req.file.buffer) } } });
+    // A bill or policy carries no application number or portal name to learn from.
+    if (OPTIONAL_UPLOADS[type]) {
+      const updated = await Customer.findById(c._id).lean();
+      return res.json({ customer: withStatus(updated, await statusContext()), warning: '' });
+    }
 
     // A person chose this customer, so the PDF's application number can be trusted for them.
     const text = await extractText(req.file.buffer);
@@ -801,7 +819,7 @@ api.delete(
     const c = await findCustomer(req, res);
     if (!c) return;
     const { type } = req.params;
-    if (!UPLOAD_TYPES[type]) return res.status(400).json({ error: 'Unknown document type' });
+    if (!ALL_UPLOADS[type]) return res.status(400).json({ error: 'Unknown document type' });
     await storage.setAside(uploadKey(c._id, type));
     const updated = await Customer.findByIdAndUpdate(c._id, { $unset: { [`uploads.${type}`]: 1 } }, { new: true }).lean();
     res.json({ customer: withStatus(updated, await statusContext()) });
@@ -813,7 +831,7 @@ api.get(
   wrap(async (req, res) => {
     const c = await findCustomer(req, res);
     if (!c) return;
-    const pdf = UPLOAD_TYPES[req.params.type] && (await getUpload(c, req.params.type));
+    const pdf = ALL_UPLOADS[req.params.type] && (await getUpload(c, req.params.type));
     if (!pdf) return res.status(404).json({ error: 'This PDF could not be found. Upload it again.' });
     res.setHeader('Content-Type', 'application/pdf');
     res.send(pdf);
@@ -833,10 +851,18 @@ api.post(
     // the rest, so their application numbers and names are known when the others are placed.
     const items = [];
     const seen = new Set();
+    const photos = new Set();
     for (const [index, file] of (req.files || []).map(fixName).entries()) {
+      // A photo can only be a bill or a policy; it is kept as a one-page PDF.
+      if (isImage(file.buffer)) {
+        file.buffer = await imageToPdf(file.buffer);
+        file.size = file.buffer.length;
+        file.originalname = file.originalname.replace(/\.(jpe?g|png)$/i, '') + '.pdf';
+        photos.add(index);
+      }
       const name = file.originalname;
       if (!isPdf(file.buffer)) {
-        items.push({ index, name, skip: 'rejected', reason: 'Not a PDF file' });
+        items.push({ index, name, skip: 'rejected', reason: 'Not a PDF file or a photo' });
         continue;
       }
       const hash = fileHash(file.buffer);
@@ -846,7 +872,9 @@ api.post(
       }
       seen.add(hash);
       const text = await extractText(file.buffer);
-      items.push({ index, name, file, text, type: detectType(name, text), first: hasCustomerMobile(name, text, customers) });
+      let type = detectType(name, text);
+      if (photos.has(index) && !OPTIONAL_UPLOADS[type]) type = null; // a photo is never a portal document
+      items.push({ index, name, file, text, type, first: !OPTIONAL_UPLOADS[type] && hasCustomerMobile(name, text, customers) });
     }
     items.sort((a, b) => Number(!!b.first) - Number(!!a.first) || a.index - b.index);
 
@@ -867,7 +895,7 @@ api.post(
         continue;
       }
       if (placed.result === 'saved') await recordSaved(placed, { originalName: name, size: file.size }, text);
-      touched.set(String(placed.customer._id), placed.customer);
+      if (UPLOAD_TYPES[type]) touched.set(String(placed.customer._id), placed.customer);
       results.push({ index, name, result: placed.result, type, customer: brief(placed.customer), how: placed.how, note: placed.note || '' });
     }
 
@@ -875,7 +903,7 @@ api.post(
     const alsoFiled = await resolvePending(customers);
     for (const f of alsoFiled) {
       const c = customers.find((x) => String(x._id) === f.customer.id);
-      if (c) touched.set(f.customer.id, c);
+      if (c && UPLOAD_TYPES[f.type]) touched.set(f.customer.id, c);
     }
     const done = new Map(alsoFiled.map((f) => [f.name, f]));
 
@@ -920,7 +948,7 @@ api.post(
     const p = await findPending(req, res);
     if (!p) return;
     const { customerId, type } = req.body || {};
-    if (!UPLOAD_TYPES[type]) return res.status(400).json({ error: 'Choose which document this is' });
+    if (!ALL_UPLOADS[type]) return res.status(400).json({ error: 'Choose which document this is' });
     const c = mongoose.isValidObjectId(customerId) ? await Customer.findById(customerId).lean() : null;
     if (!c) return res.status(400).json({ error: 'Choose the customer' });
     const buffer = await storage.get(pendingKey(p.storedName), 'w');

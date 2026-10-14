@@ -184,8 +184,8 @@ export default function Customers({ customers }) {
                   <td className="d"><Mark doc={c.status.agreement} label="Model Agreement" /></td>
                   <td className="d"><Mark doc={c.status.fl} label="Feasibility Letter" /></td>
                   <td className="d nw">
-                    <i className={`dot ${c.billAttached ? 'ok' : 'off'}`} title={c.billAttached ? 'Bill is in the file' : 'Bill not ticked yet'} />{' '}
-                    <i className={`dot ${c.insuranceAttached ? 'ok' : 'off'}`} title={c.insuranceAttached ? 'Insurance policy is in the file' : 'Insurance not ticked yet'} />
+                    <i className={`dot ${c.status.bill?.inFile ? 'ok' : 'off'}`} title={c.status.bill?.uploaded ? 'Bill uploaded, printed with the file' : c.billAttached ? 'Paper bill added by hand' : 'No bill (optional)'} />{' '}
+                    <i className={`dot ${c.status.insurance?.inFile ? 'ok' : 'off'}`} title={c.status.insurance?.uploaded ? 'Insurance policy uploaded, printed with the file' : c.insuranceAttached ? 'Paper policy added by hand' : 'No insurance policy (optional)'} />
                   </td>
                   <td className="nw">
                     {c.printedAt ? <span className="pill ok" title={`Batch ${c.printBatch}`}><Printer size={13} /> Printed</span> : <ReadyPill ok={c.status.ready} />}

@@ -4,7 +4,7 @@ import { Check, Eye, FileUp, Trash2, X } from 'lucide-react';
 import { api } from '../api.js';
 import { Notice, T } from '../ui.jsx';
 
-const TYPES = { dcr: 'DCR certificate', agreement: 'Model Agreement', fl: 'Feasibility Letter (FL)' };
+const TYPES = { dcr: 'DCR certificate', agreement: 'Model Agreement', fl: 'Feasibility Letter (FL)', bill: 'Electricity bill', insurance: 'Insurance policy' };
 const GU = '૦૧૨૩૪૫૬૭૮૯';
 const ascii = (s) => String(s || '').replace(/[૦-૯]/g, (d) => GU.indexOf(d)).toLowerCase();
 
@@ -119,8 +119,8 @@ export default function BulkUpload({ customers, onChanged }) {
   }, [loadPending]);
 
   const send = async (fileList) => {
-    const files = [...fileList].filter((f) => f.name.toLowerCase().endsWith('.pdf'));
-    if (!files.length) return setError('Choose PDF files.');
+    const files = [...fileList].filter((f) => /\.(pdf|jpe?g|png)$/i.test(f.name));
+    if (!files.length) return setError('Choose PDF files (or photos of bills and policies).');
     setError('');
     const all = [];
     const people = new Map();
@@ -161,9 +161,10 @@ export default function BulkUpload({ customers, onChanged }) {
         <div>
           <h1><T en="Upload PDFs" gu="PDF અપલોડ" /></h1>
           <p className="prose">
-            Drop the DCR, Model Agreement and FL PDFs here, many at once, in any order and without renaming. The app reads
-            every PDF, checks the application number, mobile number, name and village in it against your customers, and
-            files it. At the end it tells you only what it could not settle, and which customers are still missing a document.
+            Drop the DCR, Model Agreement and FL PDFs here, and electricity bills and insurance policies too, many at once,
+            in any order and without renaming. The app works out which document each file is, checks the application number,
+            consumer number, mobile number, name and village in it against your customers, and files it. At the end it tells
+            you only what it could not settle, and which customers are still missing a document.
           </p>
         </div>
       </div>
@@ -177,9 +178,9 @@ export default function BulkUpload({ customers, onChanged }) {
         <div className="drop-icon"><FileUp size={22} /></div>
         <div style={{ flex: 1, minWidth: 0 }}>
           <b>{busy || 'Drag PDF files here, or click to choose'}</b>
-          <span className="hint">Upload a customer's FL together with their Agreement and DCR: the FL makes the other two certain.</span>
+          <span className="hint">Upload a customer's FL together with their Agreement and DCR: the FL makes the other two certain. Bills and policies may also be photos (JPG / PNG).</span>
         </div>
-        <input type="file" accept=".pdf,application/pdf" multiple disabled={!!busy} onChange={(e) => { send(e.target.files); e.target.value = ''; }} />
+        <input type="file" accept=".pdf,application/pdf,.jpg,.jpeg,.png,image/jpeg,image/png" multiple disabled={!!busy} onChange={(e) => { send(e.target.files); e.target.value = ''; }} />
       </label>
       {error && <Notice>{error}</Notice>}
 
