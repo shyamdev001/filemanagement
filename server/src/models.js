@@ -86,6 +86,23 @@ export const Customer = mongoose.model('Customer', customerSchema);
 export const Pending = mongoose.model('PendingUpload', pendingSchema);
 export const Setting = mongoose.model('Setting', settingSchema);
 
+// A staff member who signs in to the app. The password is kept only as a salted scrypt hash.
+const staffSchema = new mongoose.Schema(
+  {
+    name: { type: String, required: true },
+    username: { type: String, required: true, unique: true }, // lower case
+    mobile: { type: String, default: '' },
+    passwordHash: { type: String, required: true },
+    admin: { type: Boolean, default: false }, // can add staff and reset passwords
+    active: { type: Boolean, default: true },
+    // Raised when the password is reset or the account is switched off: signs the person out everywhere.
+    sessionVersion: { type: Number, default: 1 },
+    lastLoginAt: { type: Date, default: null },
+  },
+  { timestamps: true }
+);
+export const Staff = mongoose.model('Staff', staffSchema);
+
 export async function getSetting(key, fallback = null) {
   const doc = await Setting.findOne({ key }).lean();
   return doc ? doc.value : fallback;

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Link, NavLink, Route, Routes } from 'react-router-dom';
-import { ClipboardPaste, FileSpreadsheet, FileUp, FolderCog, Globe, LogOut, Printer, Users } from 'lucide-react';
+import { ClipboardPaste, FileSpreadsheet, FileUp, FolderCog, Globe, LogOut, Printer, UserCog, UserRound, Users } from 'lucide-react';
 import Print from './pages/Print.jsx';
 import PortalHelper from './pages/PortalHelper.jsx';
 import { api } from './api.js';
@@ -12,6 +12,8 @@ import ImportExcel from './pages/ImportExcel.jsx';
 import BulkUpload from './pages/BulkUpload.jsx';
 import Settings from './pages/Settings.jsx';
 import Login from './pages/Login.jsx';
+import Staff from './pages/Staff.jsx';
+import Account from './pages/Account.jsx';
 
 const NAV = [
   { to: '/', end: true, icon: Users, en: 'Customers', gu: 'ગ્રાહકો' },
@@ -21,6 +23,7 @@ const NAV = [
   { to: '/bulk', icon: ClipboardPaste, en: 'Names & serials', gu: 'નામ અને સીરીયલ નંબર' },
   { to: '/import', icon: FileSpreadsheet, en: 'Import Excel', gu: 'એક્સેલ ઈમ્પોર્ટ' },
   { to: '/settings', icon: FolderCog, en: 'Datasheets', gu: 'ડેટાશીટ સેટિંગ' },
+  { to: '/staff', icon: UserCog, en: 'Staff', gu: 'સ્ટાફ', admin: true },
 ];
 
 export default function App() {
@@ -66,7 +69,9 @@ export default function App() {
     return () => window.removeEventListener('login-needed', onNeeded);
   }, [checkLogin]);
 
-  if (me && !me.loggedIn) return <Login onDone={checkLogin} />;
+  if (!me && !error) return null; // asking the server who is signed in
+  if (me && !me.loggedIn) return <Login setup={me.setupNeeded} onDone={checkLogin} />;
+  const user = me?.user;
 
   const ready = customers ? customers.filter((c) => c.status.ready).length : 0;
 
@@ -81,7 +86,7 @@ export default function App() {
           </div>
         </Link>
         <nav className="side-nav" aria-label="Main">
-          {NAV.map(({ to, end, icon: Icon, en, gu }) => (
+          {NAV.filter((n) => !n.admin || user?.admin).map(({ to, end, icon: Icon, en, gu }) => (
             <NavLink key={to} to={to} end={end} className={({ isActive }) => (isActive ? 'side-link active' : 'side-link')}>
               <Icon size={19} />
               <div>
@@ -101,10 +106,19 @@ export default function App() {
               <b>{customers.filter((c) => c.printedAt).length.toLocaleString('en-IN')}</b> printed
             </div>
           )}
-          {me?.loginRequired && (
-            <button className="btn small on-dark" onClick={() => api.post('/logout').then(checkLogin)}>
-              <LogOut size={15} /> Log out
-            </button>
+          {user && (
+            <div className="side-user">
+              <Link to="/account" className="side-me" title="My account">
+                <UserRound size={16} />
+                <span>
+                  <b>{user.name}</b>
+                  <small>{user.admin ? 'Admin' : 'Staff'} · My account</small>
+                </span>
+              </Link>
+              <button className="btn small on-dark" onClick={() => api.post('/logout').then(checkLogin)}>
+                <LogOut size={15} /> Log out
+              </button>
+            </div>
           )}
         </div>
       </aside>
@@ -119,6 +133,8 @@ export default function App() {
           <Route path="/bulk" element={<BulkPaste onChanged={reload} />} />
           <Route path="/import" element={<ImportExcel onChanged={reload} />} />
           <Route path="/settings" element={<Settings customers={customers} onChanged={reload} />} />
+          <Route path="/staff" element={user?.admin ? <Staff me={user} /> : <div className="page"><Notice>Only an admin can manage staff.</Notice></div>} />
+          <Route path="/account" element={<Account me={user} />} />
         </Routes>
       </main>
     </div>

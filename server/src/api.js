@@ -49,33 +49,7 @@ export const api = express.Router();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 30 * 1024 * 1024 } });
 const wrap = (fn) => (req, res, next) => fn(req, res, next).catch(next);
 
-// ---------- login (only when APP_PASSWORD is set) ----------
-const sessionToken = () => crypto.createHmac('sha256', config.appPassword).update('solar-file-session').digest('hex');
-const readCookie = (req, name) =>
-  (req.headers.cookie || '')
-    .split(';')
-    .map((p) => p.trim().split('='))
-    .find(([k]) => k === name)?.[1];
-const loggedIn = (req) => !config.appPassword || readCookie(req, 'sfs') === sessionToken();
-
-api.get('/me', (req, res) => res.json({ loginRequired: !!config.appPassword, loggedIn: loggedIn(req) }));
-
-api.post('/login', (req, res) => {
-  const given = Buffer.from(String(req.body?.password ?? ''));
-  const want = Buffer.from(config.appPassword);
-  if (!config.appPassword || (given.length === want.length && crypto.timingSafeEqual(given, want))) {
-    res.setHeader('Set-Cookie', `sfs=${sessionToken()}; HttpOnly; SameSite=Lax; Path=/; Max-Age=2592000${config.hosted ? '; Secure' : ''}`);
-    return res.json({ ok: true });
-  }
-  res.status(401).json({ error: 'Wrong password' });
-});
-
-api.post('/logout', (req, res) => {
-  res.setHeader('Set-Cookie', 'sfs=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0');
-  res.json({ ok: true });
-});
-
-api.use((req, res, next) => (loggedIn(req) ? next() : res.status(401).json({ error: 'Login required' })));
+// Signing in is handled by staff.js, which runs before these routes: every request here has req.staff.
 
 // ---------- customers ----------
 async function statusContext() {

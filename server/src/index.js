@@ -4,17 +4,13 @@ import express from 'express';
 import mongoose from 'mongoose';
 import { config } from './config.js';
 import { api } from './api.js';
+import { staffAuth } from './staff.js';
 import { portal, portalCors } from './portal.js';
 import { SERVER_DIR } from './config.js';
 import compression from 'compression';
 import { closeBrowser, warmUp } from './lib/pdf.js';
 import { storage } from './lib/storage.js';
 import { backfillDcrPanels } from './lib/dcr.js';
-
-if (config.hosted && config.appPassword.length < 8) {
-  console.error('\nAPP_PASSWORD is missing or shorter than 8 characters. The hosted app holds customer documents and will not start without a password.\n');
-  process.exit(1);
-}
 
 if (!config.mongoUri) {
   console.error('\nMONGODB_URI is missing. Put your MongoDB Atlas connection string in server\\.env (see server\\.env.example).\n');
@@ -39,6 +35,7 @@ app.get('/portal-helper.js', portalCors, (req, res) => {
 });
 app.options('/portal-helper.js', portalCors);
 app.use('/api/portal', portal);
+app.use('/api', staffAuth); // sign-in and staff accounts; guards every route below
 app.use('/api', api);
 
 // The built React app (client/dist) is served by the same server.

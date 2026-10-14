@@ -10,8 +10,6 @@ services:
       # Typed in the Render dashboard, never stored in this file.
       - key: MONGODB_URI
         sync: false
-      - key: APP_PASSWORD
-        sync: false
       - key: CLOUDINARY_CLOUD_NAME
         sync: false
       - key: CLOUDINARY_API_KEY

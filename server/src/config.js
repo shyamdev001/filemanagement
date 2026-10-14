@@ -34,7 +34,6 @@ export const config = {
   // Leave empty for no login (local use). Set it before hosting.
   // Set to keep uploaded PDFs in Cloudinary instead of on this computer (needed on a host without a disk).
   cloudinary: cloudinaryAccount(),
-  appPassword: process.env.APP_PASSWORD || '',
   // true on the hosting server (NODE_ENV=production)
   hosted: process.env.NODE_ENV === 'production',
 };
