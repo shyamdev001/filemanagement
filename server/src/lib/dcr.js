@@ -3,10 +3,13 @@ import { storage } from './storage.js';
 import { extractText, uploadKey } from './uploads.js';
 
 /** Bump when the reader changes, so stored DCRs are read again. */
-const VERSION = 4;
+const VERSION = 5;
 
 /** Upper case without spaces, so "BI - 55 - 540" and "BI-55-540" compare equal. */
 export const squash = (s) => String(s || '').toUpperCase().replace(/\s+/g, '');
+
+/** "PSSU / 446" and "pssu/446" are the same invoice. */
+export const normalizeInvoiceNo = (s) => String(s || '').toUpperCase().replace(/\s+/g, '');
 
 /** Brand from the model code first (an OEM can make another brand's module), then the maker. */
 function brandOf(code, maker) {
@@ -53,7 +56,10 @@ export function readDcrPanels(text) {
       topcon: /TOPCON|N-TYPE|^BIN-|^ASBT|G12R/.test(squash(all)) || /^BIN-|^ASBT/.test(squash(code)),
     });
   }
-  return { read: items.length > 0, maker: maker.trim(), items };
+  // The DCR prints the Tally invoice it belongs to: "Invoice / E-Way Ref  Date  KW (Kilowatt)  Quantity  PSSU/446  29-Apr-2026  3.33  6"
+  const inv = t.match(/Invoice\s*\/\s*E-?\s*Way\s*Ref\s+Date\s+KW\s*\(\s*Kilowatt\s*\)\s+Quantity\s+([A-Za-z0-9]+(?:\s*[\/\-]\s*[A-Za-z0-9]+)+)\s+(\d{1,2}\s*-\s*[A-Za-z]{3}\s*-\s*\d{2,4})/i);
+  const invoice = inv ? { no: normalizeInvoiceNo(inv[1]), date: inv[2].replace(/\s+/g, '') } : null;
+  return { read: items.length > 0, maker: maker.trim(), items, invoice };
 }
 
 /** Read a customer's stored DCR and remember what modules it lists. */

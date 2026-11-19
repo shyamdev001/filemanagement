@@ -34,3 +34,9 @@ test('the repeat of each item on page 2 is not counted twice', () => {
   const r = readDcrPanels(dcr('Waaree Energies Limited', `${item} 25 - Mar - 26 Wafer to Cell Conversion - Jupiter Solar Cells to Solar Panels Conversion - Waaree Energies Limited ${item}`));
   assert.deepEqual(r.items.map((i) => [i.code, i.qty]), [['BiN - 08 - 585(DCR)', 6]]);
 });
+
+test('the Tally invoice number printed on the DCR', () => {
+  const r = readDcrPanels('Solar Module Manufactured By : Waaree Energies Limited Address : X Invoice / E-Way Ref Date KW (Kilowatt) Quantity PSSU/446 29-Apr-2026 3.33 6 Printed on : 19-May-2026 Item Description Quantity KW BI - 55 - 540(DCR) (Wp : 540 Efficiency : 20.98) SPGS G - G MODULE 6 3.24');
+  assert.deepEqual(r.invoice, { no: 'PSSU/446', date: '29-Apr-2026' });
+  assert.equal(readDcrPanels('').invoice, null);
+});

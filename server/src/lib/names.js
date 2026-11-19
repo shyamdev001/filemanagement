@@ -32,18 +32,22 @@ const ENDING = /(BHAI|BEN|BAHEN|BEHN|KUMARI|KUMAR)$/;
 const words = (name) => String(name || '').toUpperCase().split(/[^A-Z]+/).filter((w) => w.length > 1);
 const form = (word) => {
   const bare = word.replace(ENDING, '');
-  return { full: soundKey(word), stem: soundKey(bare.length >= 3 ? bare : word) };
+  const b = bare.length >= 3 ? bare : word;
+  // bare: the word without BHAI / BEN / KUMAR. KANU and KANUBHAI are the same name even though a short name
+  // has too short a sound key (KN) to compare by sound alone.
+  return { full: soundKey(word), stem: soundKey(b), bare: b };
 };
 
 /** A customer's name prepared for findByName. */
 export const nameKeys = (englishName) => words(englishName).map(form).filter((f) => f.full);
 
 // How alike two words are: 3 = same, 2 = one is the other cut short, 1 = same name with a different ending.
-function sameWord(a, b) {
+export function sameWord(a, b) {
   if (a.full === b.full) return 3;
   const [short, long] = a.full.length <= b.full.length ? [a.full, b.full] : [b.full, a.full];
   if (short.length >= 4 && long.startsWith(short)) return 2;
-  return a.stem.length >= 3 && a.stem === b.stem ? 1 : 0;
+  if (a.stem.length >= 3 && a.stem === b.stem) return 1;
+  return a.bare.length >= 3 && a.bare === b.bare ? 1 : 0;
 }
 
 /**
@@ -123,6 +127,23 @@ export function nearNames(name, customers, limit = 3) {
  * `keys` is the customer's name prepared with nameKeys(). At least two words must agree, and every
  * word of the shorter name must be found in the longer one.
  */
+/** How many words of a name are also in the keys (each key used once). */
+export function sharedWords(name, keys) {
+  const free = [...(keys || [])];
+  let found = 0;
+  for (const w of nameKeys(name)) {
+    const i = free.findIndex((k) => sameWord(w, k) > 0);
+    if (i >= 0) {
+      found++;
+      free.splice(i, 1);
+    }
+  }
+  return found;
+}
+
+/** A portal name, tidied for comparing with the names staff confirmed by hand. */
+export const plainName = (s) => String(s || '').toUpperCase().replace(/[^A-Z ]+/g, ' ').replace(/\s+/g, ' ').trim();
+
 export function namesAgree(name, keys) {
   const want = nameKeys(name);
   if (want.length < 2 || !keys || keys.length < 2) return false;

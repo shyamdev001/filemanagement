@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
-import { Check, ChevronLeft, Eye, FileDown, FileText, Trash2, Upload } from 'lucide-react';
+import { Check, CheckCheck, ChevronLeft, Eye, FileDown, FileText, Pencil, Send, StickyNote, Trash2, Upload } from 'lucide-react';
+import { DetailsForm, toForm } from './CustomerForm.jsx';
 import { api, datasheetUrl, fileName } from '../api.js';
 import { Notice, Problems, ReadyPill, T } from '../ui.jsx';
 
@@ -24,7 +25,7 @@ const UPLOADS = [
 ];
 // Optional: printed at the end of the file when uploaded; the file is Ready without them.
 const OPTIONAL = [
-  { type: 'bill', en: 'Electricity bill', gu: 'લાઈટ બીલ', optional: true },
+  { type: 'bill', en: 'Bill (Tally invoice)', gu: 'બીલ (ટેલી)', optional: true },
   { type: 'insurance', en: 'Insurance policy', gu: 'વીમા પોલિસી', optional: true },
 ];
 
@@ -97,6 +98,97 @@ function UploadSlot({ n, slot, doc, customerId, stamp, onDone, onError }) {
   );
 }
 
+const when = (d) => new Date(d).toLocaleString('en-IN', { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+
+/** Why the file is not ready, or not printed yet: worked out from the documents, in plain words. */
+export function reasons(c) {
+  const st = c.status;
+  if (c.printedAt) return c.sentAt ? [] : ['Printed, but not sent yet'];
+  if (st.ready) return ['Ready, but not printed yet'];
+  const docs = [
+    ['Payee certificate', st.payee],
+    ['Panel datasheet', st.datasheet],
+    ['Inverter', st.inverter],
+    ['DCR', st.dcr],
+    ['Model Agreement', st.agreement],
+    ['FL', st.fl],
+  ];
+  return docs.flatMap(([label, d]) => (d.ok ? [] : (d.problems || []).length ? d.problems.map((p) => (p.startsWith(label) ? p : `${label}: ${p}`)) : [`${label} is not ready`]));
+}
+
+// One click fills the note box; staff can add to it before saving.
+const QUICK = [
+  'Waiting for the customer\'s documents',
+  'Bill not received yet',
+  'Payment pending',
+  'Installation not finished',
+  'Waiting on the portal',
+  'Customer will collect the file',
+];
+
+/** Notes: the app's own reasons first, then what staff wrote (who and when). */
+function NotesPanel({ c, onSaved, onError }) {
+  const [text, setText] = useState('');
+  const [busy, setBusy] = useState(false);
+  const auto = reasons(c);
+
+  const add = async (e) => {
+    e.preventDefault();
+    if (!text.trim()) return;
+    setBusy(true);
+    try {
+      onSaved((await api.post(`/customers/${c._id}/notes`, { text })).customer, 'Note added');
+      setText('');
+    } catch (err) {
+      onError(err.message);
+    }
+    setBusy(false);
+  };
+  const remove = async (n) => {
+    if (!window.confirm('Remove this note?')) return;
+    try {
+      onSaved((await api.del(`/customers/${c._id}/notes/${n.id}`)).customer, 'Note removed');
+    } catch (err) {
+      onError(err.message);
+    }
+  };
+
+  return (
+    <section className="panel">
+      <div className="panel-head">
+        <h2><T en="Notes" gu="નોંધ" /></h2>
+        <span className="hint">{c.printedAt ? 'Printed' : c.status.ready ? 'Why not printed' : 'Why not ready'}</span>
+      </div>
+      <div className="panel-body notes">
+        {auto.length > 0 && (
+          <div className="why">
+            <b>{c.status.ready ? 'The app says:' : 'Not ready because:'}</b>
+            <ul>{auto.map((r) => <li key={r}>{r}</li>)}</ul>
+          </div>
+        )}
+        {(c.notes || []).slice().reverse().map((n) => (
+          <div key={n.id} className="note">
+            <p>{n.text}</p>
+            <div className="note-by">
+              <span>{n.by || 'Someone'} · {when(n.at)}</span>
+              <button className="btn quiet small" aria-label="Remove note" title="Remove note" onClick={() => remove(n)}><Trash2 size={14} /></button>
+            </div>
+          </div>
+        ))}
+        <form className="form" onSubmit={add} style={{ gap: 10 }}>
+          <textarea rows={2} value={text} onChange={(e) => setText(e.target.value)} placeholder="Why is the file not ready or not printed? Anything staff should know." aria-label="New note" />
+          <div className="chips">
+            {QUICK.map((q) => (
+              <button type="button" key={q} className="chip" onClick={() => setText((t) => (t.trim() ? `${t.trim()}. ${q}` : q))}>{q}</button>
+            ))}
+          </div>
+          <div><button className="btn primary small" disabled={busy || !text.trim()}><StickyNote size={14} /> <T en="Add note" gu="નોંધ ઉમેરો" /></button></div>
+        </form>
+      </div>
+    </section>
+  );
+}
+
 export default function CustomerDetail({ customers, onChanged }) {
   const { id } = useParams();
   const navigate = useNavigate();
@@ -107,6 +199,7 @@ export default function CustomerDetail({ customers, onChanged }) {
   const [error, setError] = useState('');
   // Changes after each save so the PDF links are not served from the browser cache.
   const [stamp, setStamp] = useState(Date.now());
+  const [details, setDetails] = useState(null); // the details form while editing
 
   const take = (customer) => {
     setC(customer);
@@ -165,16 +258,41 @@ export default function CustomerDetail({ customers, onChanged }) {
             {c.englishNameShown && <span>{c.englishNameShown}</span>}
             <span lang="gu">{[c.village, c.taluka].filter(Boolean).join(', ')}</span>
             <span>{c.mobile || 'no mobile'}</span>
-            <span>{c.sheet}, Excel row {c.excelRow}</span>
+            <span>{c.manual ? `${c.sheet}, added by hand` : `${c.sheet}, Excel row ${c.excelRow}`}</span>
           </div>
         </div>
         <div className="head-actions">
+          <button className="btn" onClick={() => setDetails(toForm(c))}><Pencil size={16} /> <T en="Edit details" gu="વિગત બદલો" /></button>
+          {!c.printedAt && (
+            <button
+              className="btn"
+              onClick={() => {
+                const why = reasons(c).filter((r) => !r.startsWith('Ready'));
+                const ok = st.ready
+                  ? window.confirm('Mark this customer\'s file as printed and complete?')
+                  : window.confirm(`This file is not ready:\n\n• ${why.join('\n• ')}\n\nMark it as printed and complete anyway?`);
+                if (ok) save({ printed: true }, 'Marked as printed');
+              }}
+            >
+              <CheckCheck size={16} /> <T en="Printed (complete)" gu="પ્રિન્ટ થઈ ગઈ" />
+            </button>
+          )}
           {c.printedAt && (
-            <span className="pill ok big" title="Click Undo to mark this customer as not printed">
-              Printed · batch {c.printBatch}
+            <span className="pill ok big" title={`Printed ${when(c.printedAt)}${c.printedBy ? ` by ${c.printedBy}` : ''}. Click Undo to mark as not printed.`}>
+              {c.printBatch ? `Printed · batch ${c.printBatch}` : `Printed${c.printedBy ? ` by ${c.printedBy}` : ''}`}
               <button className="pill-x" aria-label="Mark as not printed" onClick={() => window.confirm('Mark this customer as NOT printed?') && save({ printed: false }, 'Marked as not printed')}>Undo</button>
             </span>
           )}
+          {c.sentAt ? (
+            <span className="pill ok big" title={`Sent ${when(c.sentAt)}${c.sentBy ? ` by ${c.sentBy}` : ''}. Click Undo if it was not sent.`}>
+              <Send size={14} /> Sent{c.sentBy ? ` by ${c.sentBy}` : ''} · {new Date(c.sentAt).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })}
+              <button className="pill-x" aria-label="Mark as not sent" onClick={() => window.confirm('Mark this file as NOT sent?') && save({ sent: false }, 'Marked as not sent')}>Undo</button>
+            </span>
+          ) : c.printedAt ? (
+            <button className="btn" onClick={() => save({ sent: true }, 'Marked as sent')}>
+              <Send size={16} /> <T en="Sent" gu="મોકલી દીધી" />
+            </button>
+          ) : null}
           <ReadyPill ok={st.ready} big />
           <a className="btn primary" href={pdf('file')} target="_blank" rel="noreferrer">
             <FileDown size={17} /> <T en="Open customer file" gu="ફાઈલ ખોલો" />
@@ -183,11 +301,56 @@ export default function CustomerDetail({ customers, onChanged }) {
       </div>
 
       {error && <Notice>{error}</Notice>}
-      {!c.inExcel && <Notice kind="warn">This customer is no longer in the Excel file. Nothing was deleted; check the Excel sheet.</Notice>}
+      {(() => {
+        const plain = (s) => String(s || '').replace(/\s+/g, ' ').trim();
+        const twins = (customers || []).filter((x) => x._id !== c._id && plain(x.name) === plain(c.name));
+        return twins.length > 0 ? (
+          <Notice kind="warn">
+            <b>Same name, different customer:</b>{' '}
+            {twins.map((t, i) => (
+              <span key={t._id}>
+                {i > 0 && ', '}
+                <a href={`/customer/${t._id}`} onClick={(e) => { e.preventDefault(); navigate(`/customer/${t._id}`); }} lang="gu">
+                  {t.village || 'no village'}, {t.kw ?? '?'} kW, {t.manual ? 'added by hand' : `row ${t.excelRow}`}
+                </a>
+              </span>
+            ))}
+            . This page is <span lang="gu">{c.village}</span>, {c.kw ?? '?'} kW{c.manual ? '' : `, row ${c.excelRow}`}.
+          </Notice>
+        ) : null;
+      })()}
+      {c.portal?.mobile && !(c.mobiles || []).includes(c.portal.mobile) && (
+        <Notice kind="warn">
+          <b>The mobile number on the portal is different:</b> the portal has {c.portal.mobile}, your Excel has {(c.mobiles || []).join(', ') || 'none'}. Check which one is right; press <b>Edit details</b> to change it here.
+        </Notice>
+      )}
+      {!c.inExcel && !c.manual && <Notice kind="warn">This customer is no longer in the Excel file. Nothing was deleted; check the Excel sheet.</Notice>}
       {c.issues?.length > 0 && (
         <Notice kind="warn">
-          <b>Fix in Excel, then import again:</b> {c.issues.join(' · ')}
+          <b>Details missing:</b> {c.issues.join(' · ')}. Press <b>Edit details</b> to fill them in.
         </Notice>
+      )}
+      {details && (
+        <form
+          className="panel"
+          onSubmit={async (e) => {
+            e.preventDefault();
+            await save({ details }, 'Details saved');
+            setDetails(null);
+          }}
+        >
+          <div className="panel-head">
+            <h2><T en="Edit details" gu="વિગત બદલો" /></h2>
+            <span className="hint">{c.manual ? 'Added by hand' : 'A field you change here is kept when the Excel is imported again.'}</span>
+          </div>
+          <div className="panel-body form">
+            <DetailsForm value={details} onChange={setDetails} edited={{ ...(c.edited || {}) }} />
+            <div className="row">
+              <button className="btn primary"><T en="Save details" gu="વિગત સેવ કરો" /></button>
+              <button type="button" className="btn" onClick={() => setDetails(null)}>Cancel</button>
+            </div>
+          </div>
+        </form>
       )}
 
       <div className="split">
@@ -283,6 +446,17 @@ export default function CustomerDetail({ customers, onChanged }) {
         </section>
 
         <div className="stack">
+          <NotesPanel
+            c={c}
+            onError={setError}
+            onSaved={(customer, done) => {
+              take(customer);
+              setError('');
+              setMsg(done);
+              setTimeout(() => setMsg(''), 2500);
+              onChanged(customer);
+            }}
+          />
           {isWarranty && (
             <section className="panel">
               <div className="panel-head">
@@ -337,6 +511,18 @@ export default function CustomerDetail({ customers, onChanged }) {
                 />
                 <span className="hint">Filled in by itself from the FL. The Agreement and DCR are matched to the customer by this number.</span>
               </label>
+              {c.nameAliases?.length > 0 && (
+                <div className="field">
+                  <span><T en="Also on the portal as" gu="પોર્ટલ પર આ નામે પણ" /></span>
+                  {c.nameAliases.map((n) => (
+                    <div key={n} className="row" style={{ gap: 8 }}>
+                      <b>{n}</b>
+                      <button className="btn quiet small" onClick={() => window.confirm(`Remove "${n}"? Documents in this name will no longer be matched to this customer.`) && save({ removeAlias: n }, 'Removed')}>Remove</button>
+                    </div>
+                  ))}
+                  <span className="hint">Linked by staff in the portal helper: the portal spells the name differently.</span>
+                </div>
+              )}
               <label className="check">
                 <input type="checkbox" checked={!!c.billAttached} onChange={(e) => save({ billAttached: e.target.checked })} />
                 <span><T en="Paper bill added by hand" gu="બીલ હાથથી ફાઈલમાં મૂક્યું" /></span>
@@ -349,7 +535,10 @@ export default function CustomerDetail({ customers, onChanged }) {
           </section>
 
           <section className="panel">
-            <div className="panel-head"><h2><T en="From Excel" gu="એક્સેલમાંથી" /></h2></div>
+            <div className="panel-head">
+              <h2>{c.manual ? <T en="Details" gu="વિગત" /> : <T en="From Excel" gu="એક્સેલમાંથી" />}</h2>
+              {Object.keys(c.edited || {}).length > 0 && <span className="hint">Some fields changed by hand</span>}
+            </div>
             <div className="panel-body">
               <dl className="facts">
                 <dt><T en="Village" gu="ગામ" /></dt><dd lang="gu">{c.village || '—'}</dd>

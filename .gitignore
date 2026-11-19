@@ -7,3 +7,8 @@ data/
 # scratch and tool folders
 .claude/
 .impeccable/
+
+# the portal collector keeps customer data here and in Excel files: never commit it
+tools/portal-collector/data/
+tools/portal-collector/*.xlsx
+tools/portal-collector/*.csv

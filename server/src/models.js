@@ -21,6 +21,19 @@ const customerSchema = new mongoose.Schema(
     extra: { type: mongoose.Schema.Types.Mixed, default: {} },
     issues: [String],
     inExcel: { type: Boolean, default: true },
+    // Added by hand in the app (not from the Excel). Becomes an Excel customer when the Excel gets the same person.
+    manual: { type: Boolean, default: false },
+    // Excel fields corrected in the app ({ village: true, … }): a re-import does not overwrite them.
+    edited: { type: mongoose.Schema.Types.Mixed, default: {} },
+    // Staff notes, e.g. why the file is not ready or not printed: [{ id, text, by, at }]
+    notes: { type: [mongoose.Schema.Types.Mixed], default: [] },
+    printedBy: { type: String, default: '' },
+    // The finished file was sent (ticked by staff).
+    sentAt: { type: Date, default: null },
+    sentBy: { type: String, default: '' },
+    // Portal spellings a person confirmed are this customer, although the name differs from the Excel
+    // (e.g. SIRAJUDDIN SAMSUDDIN KAZI for ... મલેક). Count as "the name agrees" everywhere.
+    nameAliases: { type: [String], default: [] },
 
     // Entered in the app; never overwritten by a re-import.
     englishName: { type: String, default: '' },

@@ -12,6 +12,14 @@ import {
   ALL_UPLOADS,
   isImage,
   imageToPdf,
+  policyFrontPage,
+  billFirstPage,
+  splitInvoices,
+  cutPages,
+  pageTexts,
+  invoiceRef,
+  policyRef,
+  isInfoSheet,
   uploadKey,
   pendingKey,
   isPdf,
@@ -25,7 +33,7 @@ import {
   applicationNumbers,
   applicantName,
 } from './lib/uploads.js';
-import { toAscii, clean } from './lib/gujarati.js';
+import { toAscii, clean, parseMobiles, parseNumber } from './lib/gujarati.js';
 import { parseWorkbook } from './lib/excelImport.js';
 import {
   loadDatasheetConfig,
@@ -42,6 +50,7 @@ import { helperKey, PORTAL_ORIGIN } from './portal.js';
 import { findByName, matchByName, nearNames, nameKeys, namesAgree } from './lib/names.js';
 import { parseLine, suggestSerial, usualLength } from './lib/smartPaste.js';
 import { parseInverter } from './lib/parsers.js';
+import { ask, askRow } from './lib/ask.js';
 import { Batch } from './models.js';
 import path from 'node:path';
 
@@ -57,7 +66,7 @@ async function statusContext() {
 }
 
 // englishNameShown: the typed English name, or the one made from the Gujarati name (for search and display).
-const withStatus = (c, ctx) => ({ ...c, englishNameShown: c.englishName || englishName(c.name), status: customerStatus(c, ctx.cfg, ctx.files) });
+const withStatus = (c, ctx) => ({ ...c, englishNameShown: c.englishName || englishName(c.name), villageEnglish: englishName(c.village || ''), talukaEnglish: englishName(c.taluka || ''), status: customerStatus(c, ctx.cfg, ctx.files) });
 
 // The whole list (1,400+ customers with their status) is built once and reused until a customer,
 // the datasheet rules or the datasheet folder changes. Checking for a change is three tiny queries.
@@ -72,16 +81,33 @@ async function listVersion() {
   return [last?.updatedAt?.getTime() || 0, count, rules?.updatedAt?.getTime() || 0, files].join('-');
 }
 
+async function ensureList() {
+  const version = await listVersion();
+  if (listCache.version !== version) {
+    const ctx = await statusContext();
+    const docs = await Customer.find({}, { extra: 0 }).sort({ sheet: 1, excelRow: 1 }).lean();
+    const body = Buffer.from(JSON.stringify({ customers: docs.map((c) => withStatus(c, ctx)) }));
+    listCache = { version, body, gz: zlib.gzipSync(body, { level: 6 }), items: null };
+  }
+  return version;
+}
+
+// "Ask": a question in plain words, turned into filters over the same list (see lib/ask.js).
+api.post(
+  '/ask',
+  wrap(async (req, res) => {
+    const q = String(req.body?.q || '').slice(0, 300);
+    await ensureList();
+    listCache.items ||= JSON.parse(listCache.body.toString('utf8')).customers;
+    const r = ask(q, listCache.items, await loadDatasheetConfig());
+    res.json({ q, filters: r.filters, total: r.total, limit: r.limit, notes: r.notes, wantCount: r.wantCount, shown: Math.min(r.customers.length, 300), rows: r.customers.slice(0, 300).map(askRow) });
+  })
+);
+
 api.get(
   '/customers',
   wrap(async (req, res) => {
-    const version = await listVersion();
-    if (listCache.version !== version) {
-      const ctx = await statusContext();
-      const docs = await Customer.find({}, { extra: 0 }).sort({ sheet: 1, excelRow: 1 }).lean();
-      const body = Buffer.from(JSON.stringify({ customers: docs.map((c) => withStatus(c, ctx)) }));
-      listCache = { version, body, gz: zlib.gzipSync(body, { level: 6 }) };
-    }
+    const version = await ensureList();
     const tag = `"${version}"`;
     res.setHeader('ETag', tag);
     res.setHeader('Cache-Control', 'private, no-cache');
@@ -150,6 +176,105 @@ function getReady(c, st) {
     .finally(() => gettingReady.delete(id));
 }
 
+// ---------- details typed by hand ----------
+const DETAIL_FIELDS = ['name', 'village', 'taluka', 'mobiles', 'mobile', 'kw', 'panelCount', 'panelRaw', 'inverterRaw', 'installer', 'note'];
+
+/** Check and tidy the details form. Only the fields that were sent are returned. */
+function readDetails(d, current = {}) {
+  const values = {};
+  const text = (k) => {
+    if (typeof d[k] === 'string') values[k] = clean(d[k]);
+  };
+  ['name', 'village', 'taluka', 'panelRaw', 'inverterRaw', 'installer', 'note'].forEach(text);
+  if ('name' in values && !values.name) return { error: 'The name cannot be empty' };
+  if (typeof d.mobiles === 'string') {
+    const raw = toAscii(d.mobiles).trim();
+    const mobiles = parseMobiles(raw);
+    const digits = raw.match(/\d+/g) || [];
+    if (digits.some((x) => x.length !== 10)) return { error: 'A mobile number must have 10 digits. Separate two numbers with a comma.' };
+    values.mobiles = mobiles;
+  }
+  for (const k of ['kw', 'panelCount']) {
+    if (d[k] === undefined) continue;
+    const s = String(d[k] ?? '').trim();
+    const n = s === '' ? null : parseNumber(s);
+    if (s !== '' && (n == null || n <= 0)) return { error: k === 'kw' ? 'kW must be a number, for example 3.24' : 'Panel count must be a number' };
+    values[k] = n;
+  }
+  return { values, current };
+}
+
+/** The same checks the Excel import makes. */
+function detailIssues(c) {
+  const issues = [];
+  if (!c.mobiles?.length) issues.push('Mobile number is blank');
+  if (c.kw == null) issues.push('kW is blank');
+  if (!c.panelRaw) issues.push('Panel is blank');
+  if (!c.inverterRaw) issues.push('Inverter is blank');
+  return issues;
+}
+
+const sameName = (a, b) => clean(a).replace(/\s+/g, ' ') === clean(b).replace(/\s+/g, ' ');
+
+// A customer who is not in the Excel yet.
+api.post(
+  '/customers',
+  wrap(async (req, res) => {
+    const b = req.body || {};
+    const sheets = await Customer.distinct('sheet');
+    const sheet = sheets.includes(b.sheet) ? b.sheet : null;
+    if (!sheet) return res.status(400).json({ error: 'Choose the sheet (Residential, PASHUPALAK or commercial)' });
+    const { values, error } = readDetails({ name: '', ...b });
+    if (error) return res.status(400).json({ error });
+    const mobiles = values.mobiles || [];
+    // The same person in the same sheet already: open that one instead.
+    const twin = mobiles.length
+      ? (await Customer.find({ sheet, mobiles: { $in: mobiles } }, { name: 1 }).lean()).find((x) => sameName(x.name, values.name))
+      : null;
+    if (twin) return res.status(409).json({ error: `${twin.name} with this mobile number is already in ${sheet}`, id: String(twin._id) });
+    const created = await Customer.create({
+      ...values,
+      mobiles,
+      mobile: mobiles[0] || '',
+      key: `manual|${crypto.randomUUID()}`,
+      sheet,
+      manual: true,
+      inExcel: false,
+      issues: detailIssues({ ...values, mobiles }),
+      notes: clean(b.why) ? [{ id: crypto.randomUUID(), text: clean(b.why), by: req.staff?.name || '', at: new Date() }] : [],
+    });
+    res.json({ customer: withStatus(created.toObject(), await statusContext()) });
+  })
+);
+
+// Notes: why the file is not ready, why it is not printed, anything staff need to know.
+api.post(
+  '/customers/:id/notes',
+  wrap(async (req, res) => {
+    const c = await findCustomer(req, res);
+    if (!c) return;
+    const text = String(req.body?.text || '').trim().slice(0, 1000);
+    if (!text) return res.status(400).json({ error: 'Type the note first' });
+    const note = { id: crypto.randomUUID(), text, by: req.staff?.name || '', byId: String(req.staff?._id || ''), at: new Date() };
+    const updated = await Customer.findByIdAndUpdate(c._id, { $push: { notes: note } }, { new: true }).lean();
+    res.json({ customer: withStatus(updated, await statusContext()) });
+  })
+);
+
+api.delete(
+  '/customers/:id/notes/:noteId',
+  wrap(async (req, res) => {
+    const c = await findCustomer(req, res);
+    if (!c) return;
+    const note = (c.notes || []).find((n) => n.id === req.params.noteId);
+    if (!note) return res.status(404).json({ error: 'This note is no longer there' });
+    // Only the person who wrote it, or an admin.
+    if (note.byId && note.byId !== String(req.staff?._id) && !req.staff?.admin) return res.status(403).json({ error: `Only ${note.by} or an admin can remove this note` });
+    const updated = await Customer.findByIdAndUpdate(c._id, { $pull: { notes: { id: note.id } } }, { new: true }).lean();
+    res.json({ customer: withStatus(updated, await statusContext()) });
+  })
+);
+
 api.patch(
   '/customers/:id',
   wrap(async (req, res) => {
@@ -163,8 +288,32 @@ api.patch(
     if (typeof b.inverterSerial === 'string') set.inverterSerial = clean(b.inverterSerial).toUpperCase();
     if (typeof b.warrantyModel === 'string') set.warrantyModel = clean(b.warrantyModel);
     if (Array.isArray(b.manualDatasheets)) set.manualDatasheets = b.manualDatasheets.filter((f) => files.includes(f));
-    // Only un-marking is done here; marking happens through a print batch.
-    if (b.printed === false) Object.assign(set, { printedAt: null, printBatch: null });
+    // Printed: by a print batch, or marked here when the file was finished another way.
+    if (b.printed === false) Object.assign(set, { printedAt: null, printBatch: null, printedBy: '' });
+    if (b.printed === true && !c.printedAt) Object.assign(set, { printedAt: new Date(), printBatch: null, printedBy: req.staff?.name || '' });
+    // Sent: ticked by staff when the finished file has gone out.
+    if (b.sent === true && !c.sentAt) {
+      if (!c.printedAt && !set.printedAt) return res.status(400).json({ error: 'Print the file first: only a printed file can be sent' });
+      Object.assign(set, { sentAt: new Date(), sentBy: req.staff?.name || '' });
+    }
+    if (b.sent === false) Object.assign(set, { sentAt: null, sentBy: '' });
+    // Details from the Excel, corrected by hand.
+    if (b.details && typeof b.details === 'object') {
+      const { values, error } = readDetails(b.details, c);
+      if (error) return res.status(400).json({ error });
+      const edited = { ...(c.edited || {}) };
+      for (const [field, value] of Object.entries(values)) {
+        if (JSON.stringify(value) === JSON.stringify(c[field] ?? (field === 'mobiles' ? [] : field === 'kw' || field === 'panelCount' ? null : ''))) continue;
+        set[field] = value;
+        if (!c.manual) edited[field === 'mobile' ? 'mobiles' : field] = true;
+      }
+      if (set.mobiles) set.mobile = set.mobiles[0] || '';
+      if (Object.keys(set).some((k) => DETAIL_FIELDS.includes(k))) {
+        set.edited = edited;
+        set.issues = detailIssues({ ...c, ...set });
+      }
+    }
+    if (typeof b.removeAlias === 'string') set.nameAliases = (c.nameAliases || []).filter((a) => a !== b.removeAlias);
     if (typeof b.billAttached === 'boolean') set.billAttached = b.billAttached;
     if (typeof b.insuranceAttached === 'boolean') set.insuranceAttached = b.insuranceAttached;
     if (typeof b.manualInverterDatasheet === 'string') {
@@ -257,10 +406,21 @@ api.post(
       return res.status(400).json({ error: 'No customers found. Sheets needed: Residential, PASHUPALAK, commercial.', skipped: parsed.skipped });
     }
 
-    const existing = await Customer.find({}, { key: 1, sheet: 1, mobile: 1, inExcel: 1 }).lean();
+    const existing = await Customer.find({}, { key: 1, sheet: 1, mobile: 1, mobiles: 1, name: 1, inExcel: 1, manual: 1, edited: 1 }).lean();
     const byKey = new Map(existing.map((e) => [e.key, e]));
     const incomingKeys = new Set(parsed.customers.map((c) => c.key));
-    const orphans = existing.filter((e) => !incomingKeys.has(e.key));
+    // Customers added by hand are never "gone from the Excel".
+    const orphans = existing.filter((e) => !incomingKeys.has(e.key) && !e.manual);
+    // Fields corrected in the app are kept; the Excel fills in everything else.
+    const keepEdited = (c, old) => {
+      const out = { ...c };
+      for (const f of Object.keys(old?.edited || {})) {
+        delete out[f];
+        if (f === 'mobiles') delete out.mobile;
+      }
+      if (old?.edited && Object.keys(old.edited).length) delete out.issues;
+      return out;
+    };
 
     // A name corrected in Excel changes the key; if exactly one old record with the same
     // sheet + mobile lost its row, treat it as the same customer so typed data is kept.
@@ -272,15 +432,23 @@ api.post(
       const rivals = fresh.filter((f) => f.sheet === c.sheet && f.mobile === c.mobile);
       if (candidates.length === 1 && rivals.length === 1) renamed.set(String(candidates[0]._id), c);
     }
+    // A customer added by hand who is now in the Excel (same sheet, mobile and name): the same record.
+    const manual = existing.filter((e) => e.manual);
+    for (const c of fresh) {
+      if (!c.mobile || [...renamed.values()].includes(c)) continue;
+      const twins = manual.filter((m) => m.sheet === c.sheet && (m.mobiles || []).includes(c.mobile) && sameName(m.name, c.name) && !renamed.has(String(m._id)));
+      if (twins.length === 1) renamed.set(String(twins[0]._id), c);
+    }
     const renamedKeys = new Set([...renamed.values()].map((c) => c.key));
+    const oldById = new Map(existing.map((e) => [String(e._id), e]));
 
     const ops = [];
     for (const c of parsed.customers) {
       if (renamedKeys.has(c.key)) continue;
-      ops.push({ updateOne: { filter: { key: c.key }, update: { $set: { ...c, inExcel: true } }, upsert: true } });
+      ops.push({ updateOne: { filter: { key: c.key }, update: { $set: { ...keepEdited(c, byKey.get(c.key)), inExcel: true } }, upsert: true } });
     }
     for (const [id, c] of renamed) {
-      ops.push({ updateOne: { filter: { _id: new mongoose.Types.ObjectId(id) }, update: { $set: { ...c, inExcel: true } } } });
+      ops.push({ updateOne: { filter: { _id: new mongoose.Types.ObjectId(id) }, update: { $set: { ...keepEdited(c, oldById.get(id)), inExcel: true, manual: false } } } });
     }
     const gone = orphans.filter((o) => !renamed.has(String(o._id)));
     if (gone.length) {
@@ -618,12 +786,13 @@ const fixName = (file) => {
 };
 
 // Fields the matching needs for every customer.
-const MATCH_FIELDS = { name: 1, sheet: 1, village: 1, mobile: 1, mobiles: 1, englishName: 1, uploads: 1, applicationNumber: 1, 'portal.consumerNo': 1 };
+const MATCH_FIELDS = { name: 1, sheet: 1, village: 1, mobile: 1, mobiles: 1, englishName: 1, uploads: 1, applicationNumber: 1, 'portal.consumerNo': 1, nameAliases: 1, 'dcrPanels.invoice': 1, taluka: 1, kw: 1, panelRaw: 1, inverterRaw: 1 };
 async function customersForMatching() {
   const customers = await Customer.find({}, MATCH_FIELDS).lean();
   for (const c of customers) {
     c.typedName = c.englishName;
     c.consumerNo = String(c.portal?.consumerNo || '').replace(/\D/g, '');
+    c.invoiceNo = c.dcrPanels?.invoice?.no || ''; // the Tally invoice printed on their DCR
     // Portal PDFs carry the English name; fall back to the one made from the Gujarati name.
     prepareCustomer(c, c.englishName || englishName(c.name), englishName(c.village), englishName(c.name));
   }
@@ -689,13 +858,32 @@ async function sameAsStored(c, type, hash) {
  * Returns { result: 'saved' | 'same' | 'pending', … }. 'pending' means a person must decide; the
  * reason and the closest customers are returned for the "Waiting for you" list.
  */
-async function placePdf({ name, buffer, text, type }, customers) {
+async function placePdf({ name, buffer, text, type, dry = false }, customers) {
+  // An insurance policy has many pages; only the page naming the insured and the policy number is kept.
+  let kept = '';
+  if (type === 'insurance') {
+    // The customer information sheet and the policy wording sit next to the policy: not what goes in the file.
+    if (isInfoSheet(text, name)) return { name, type, appNo: '', result: 'ignored', reason: 'Not the policy schedule (customer information sheet or wording). Only the policy page is filed.' };
+    const fp = await policyFrontPage(buffer);
+    buffer = fp.buffer;
+    if (fp.text.trim()) text = fp.text;
+    if (fp.pages > 1) kept = fp.page ? `kept page ${fp.page} of ${fp.pages}` : `could not cut the pages, kept all ${fp.pages}`;
+  }
+  // A bill is the first page only (the Tax Invoice): not the e-way bill or copies that follow it.
+  if (type === 'bill') {
+    const fp = await billFirstPage(buffer);
+    buffer = fp.buffer;
+    if (fp.cut) kept = `kept page 1 of ${fp.pages}`;
+  }
   const m = matchCustomer(name, text, customers, type);
   const hash = fileHash(buffer);
   const c = m.matches.length === 1 && !m.conflict ? m.matches[0] : null;
   const base = { name, type, appNo: m.appNo };
+  // The same Tally invoice again (a month exported twice) is the same bill, even if the PDF bytes differ.
+  const ref = type === 'bill' ? invoiceRef(text) : type === 'insurance' ? policyRef(text) : '';
 
   if (c && type && (await sameAsStored(c, type, hash))) return { ...base, result: 'same', customer: c, how: m.how };
+  if (c && ref && c.uploads?.[type]?.ref === ref) return { ...base, result: 'same', customer: c, how: m.how };
 
   let reason = '';
   if (m.conflict) reason = m.conflict;
@@ -705,20 +893,20 @@ async function placePdf({ name, buffer, text, type }, customers) {
     else if (m.docName) reason = m.suggestions.length ? `No customer is named ${m.docName}. Is it one of these?` : `No customer is named ${m.docName}`;
     else if (m.appNo) reason = `No customer is known yet for application number ${m.appNo}. Upload that customer's FL and this will be filed by itself`;
     else reason = 'No customer name, mobile number or application number could be found in this PDF';
-  } else if (m.matches.length > 1) reason = `${m.matches.length} customers fit this ${m.how}, and nothing else in the PDF tells them apart`;
+  } else if (m.matches.length > 1) reason = `${m.matches.length} customers have this ${m.how}. Village, taluka, kW, panel, inverter and mobile on the file were compared and none of them settles it`;
   else if (!type) reason = 'Could not tell which document this is (DCR, Agreement, FL, bill or insurance policy)';
   else if (c.uploads?.[type]) reason = `${c.name} already has a different ${ALL_UPLOADS[type]}. Replace it?`;
 
   if (reason) return { ...base, result: 'pending', reason, candidates: (m.matches.length ? m.matches : m.suggestions).slice(0, 5) };
 
-  await saveUpload(c._id, type, buffer);
-  return { ...base, result: 'saved', customer: c, how: m.how, note: m.note || '', certain: !!m.certain, hash };
+  if (!dry) await saveUpload(c._id, type, buffer);
+  return { ...base, result: 'saved', customer: c, how: m.how, note: [m.note, kept].filter(Boolean).join('; '), certain: !!m.certain, hash, ref };
 }
 
 /** Record a PDF that placePdf saved, and learn from it. */
 async function recordSaved(placed, meta, text) {
   const c = placed.customer;
-  const full = { ...meta, hash: placed.hash, uploadedAt: new Date() };
+  const full = { ...meta, hash: placed.hash, ...(placed.ref ? { ref: placed.ref } : {}), uploadedAt: new Date() };
   await Customer.updateOne({ _id: c._id }, { $set: { [`uploads.${placed.type}`]: full } });
   c.uploads = { ...(c.uploads || {}), [placed.type]: full };
   // A bill or policy never teaches an application number or a portal name.
@@ -765,6 +953,14 @@ api.post(
       req.file.originalname = req.file.originalname.replace(/\.(jpe?g|png)$/i, '') + '.pdf';
     }
     if (!req.file || !isPdf(req.file.buffer)) return res.status(400).json({ error: OPTIONAL_UPLOADS[type] ? 'Please choose a PDF or a photo (JPG / PNG)' : 'Please choose a PDF file' });
+    if (type === 'insurance') {
+      req.file.buffer = (await policyFrontPage(req.file.buffer)).buffer;
+      req.file.size = req.file.buffer.length;
+    }
+    if (type === 'bill') {
+      req.file.buffer = (await billFirstPage(req.file.buffer)).buffer;
+      req.file.size = req.file.buffer.length;
+    }
     await saveUpload(c._id, type, req.file.buffer);
     await Customer.updateOne({ _id: c._id }, { $set: { [`uploads.${type}`]: { ...uploadMeta(fixName(req.file)), hash: fileHash(req.file.buffer) } } });
     // A bill or policy carries no application number or portal name to learn from.
@@ -812,6 +1008,125 @@ api.get(
   })
 );
 
+/**
+ * Turn raw files (uploaded, or read from a folder) into items ready to place: a photo becomes a one-page
+ * PDF, a PDF holding a month of Tally invoices is split into one PDF per invoice, the same file twice is
+ * skipped. `seen` remembers fingerprints across calls.
+ */
+async function readItems(files, customers, seen = new Set(), kind = '') {
+  const items = [];
+  const push = (o) => items.push({ index: items.length, ...o });
+  for (const file of files) {
+    let name = file.originalname;
+    let photo = false;
+    // A photo can only be a bill or a policy; it is kept as a one-page PDF.
+    if (isImage(file.buffer)) {
+      file.buffer = await imageToPdf(file.buffer);
+      file.size = file.buffer.length;
+      name = file.originalname = name.replace(/\.(jpe?g|png)$/i, '') + '.pdf';
+      photo = true;
+    }
+    if (!isPdf(file.buffer)) {
+      push({ name, skip: 'rejected', reason: 'Not a PDF file or a photo' });
+      continue;
+    }
+    const hash = fileHash(file.buffer);
+    if (seen.has(hash)) {
+      push({ name, skip: 'same', reason: 'The same PDF is in this upload twice' });
+      continue;
+    }
+    seen.add(hash);
+    const text = await extractText(file.buffer);
+    let type = detectType(name, text);
+    // The customer information sheet and the policy wording sit next to every policy: skipped, not an error.
+    if ((kind === 'insurance' || type === 'insurance') && isInfoSheet(text, name)) {
+      push({ name, skip: 'ignored', reason: 'Not the policy schedule (customer information sheet or wording). Only the policy page is filed.' });
+      continue;
+    }
+    // A folder said to hold policies (or invoices): a scan with no readable text is taken as that; anything that
+    // clearly is something else is left out.
+    if (kind) {
+      if (type && type !== kind) {
+        push({ name, skip: 'rejected', reason: `This does not look like ${ALL_UPLOADS[kind].toLowerCase()}: it looks like ${ALL_UPLOADS[type].toLowerCase()}` });
+        continue;
+      }
+      type = kind;
+    }
+    if (photo && !OPTIONAL_UPLOADS[type]) type = null; // a photo is never a portal document
+    if (type === 'bill' && !photo) {
+      const off = file.pageOffset || 0; // a piece of a big PDF: page numbers count from the start of the whole file
+      const parts = await splitInvoices(file.buffer, file.pageOffset != null ? 1 : 2);
+      if (parts) {
+        for (const p of parts) {
+          const where = p.pages.length > 1 ? `pages ${p.pages[0] + off}-${p.pages[p.pages.length - 1] + off}` : `page ${p.pages[0] + off}`;
+          push({ name: `${name} (${where})`, file: { buffer: p.buffer, size: p.buffer.length }, text: p.text, type: 'bill', first: false });
+        }
+        continue;
+      }
+    }
+    push({ name, file, text, type, first: !OPTIONAL_UPLOADS[type] && hasCustomerMobile(name, text, customers) });
+  }
+  // The PDFs that carry a mobile number (the FLs) go first, so their application numbers and names are
+  // known when the others are placed.
+  items.sort((a, b) => Number(!!b.first) - Number(!!a.first) || a.index - b.index);
+  return items;
+}
+
+/** File every item that can be settled; park the rest in "Waiting for you". */
+async function placeItems(items, customers, dry = false, scan = false) {
+  const results = [];
+  const touched = new Map();
+  for (const it of items) {
+    const { index, name, file, type, text } = it;
+    if (it.skip) {
+      results.push({ index, name, result: it.skip, reason: it.reason });
+      continue;
+    }
+    const placed = await placePdf({ name, buffer: file.buffer, text, type, dry }, customers);
+    if (placed.result === 'ignored') {
+      results.push({ index, name, result: 'ignored', type, reason: placed.reason });
+      continue;
+    }
+    // From a folder scan: a file nobody in the customer list fits (not even as a guess) is only reported, not queued.
+    if (placed.result === 'pending' && scan && !placed.candidates.length) {
+      results.push({ index, name, result: 'unmatched', type, reason: placed.reason });
+      continue;
+    }
+    if (placed.result === 'pending' && dry) {
+      results.push({ index, name, result: 'pending', type, reason: placed.reason });
+      continue;
+    }
+    if (placed.result === 'pending') {
+      const storedName = `${crypto.randomUUID()}.pdf`;
+      await storage.put(pendingKey(storedName), file.buffer, 'w');
+      await Pending.create({ originalName: name, storedName, size: file.size, detectedType: type || '', applicationNumber: placed.appNo, candidates: placed.candidates.map((c) => c._id), reason: placed.reason });
+      results.push({ index, name, result: 'pending', type, reason: placed.reason });
+      continue;
+    }
+    if (placed.result === 'saved' && !dry) await recordSaved(placed, { originalName: name, size: file.size }, text);
+    if (UPLOAD_TYPES[type]) touched.set(String(placed.customer._id), placed.customer);
+    results.push({ index, name, result: placed.result, type, customer: brief(placed.customer), how: placed.how, note: placed.note || '' });
+  }
+  return { results, touched };
+}
+
+/** What a bulk upload or a folder scan answers with: the results, the waiting PDFs that could now be placed, who is still missing a document. */
+async function finishBatch(results, touched, customers, dry = false) {
+  // Anything that was waiting (from this batch or an earlier one) and can now be placed.
+  const alsoFiled = dry ? [] : await resolvePending(customers);
+  for (const f of alsoFiled) {
+    const c = customers.find((x) => String(x._id) === f.customer.id);
+    if (c && UPLOAD_TYPES[f.type]) touched.set(f.customer.id, c);
+  }
+  const done = new Map(alsoFiled.map((f) => [f.name, f]));
+  return {
+    results: results.sort((a, b) => a.index - b.index).map((r) => (r.result === 'pending' && done.has(r.name) ? { ...r, ...done.get(r.name), reason: '' } : r)),
+    alsoFiled: alsoFiled.filter((f) => !results.some((r) => r.name === f.name)),
+    // For every customer this batch touched: which of the three portal documents they now have.
+    customers: [...touched.values()].map((c) => ({ ...brief(c), has: Object.fromEntries(Object.keys(UPLOAD_TYPES).map((t) => [t, !!c.uploads?.[t]])) })),
+  };
+}
+
 // Many PDFs at once. Every PDF is read, every clue cross-checked, and whatever is certain is filed.
 // Only the PDFs the app cannot settle are left for a person, each with the reason and its best guesses.
 api.post(
@@ -820,80 +1135,127 @@ api.post(
   wrap(async (req, res) => {
     const customers = await customersForMatching();
     await learnFromStoredUploads(customers);
+    const items = await readItems((req.files || []).map(fixName), customers);
+    const { results, touched } = await placeItems(items, customers);
+    res.json(await finishBatch(results, touched, customers));
+  })
+);
 
-    // Read everything first, then handle the PDFs that carry a mobile number (the FLs) before
-    // the rest, so their application numbers and names are known when the others are placed.
-    const items = [];
-    const seen = new Set();
-    const photos = new Set();
-    for (const [index, file] of (req.files || []).map(fixName).entries()) {
-      // A photo can only be a bill or a policy; it is kept as a one-page PDF.
-      if (isImage(file.buffer)) {
-        file.buffer = await imageToPdf(file.buffer);
-        file.size = file.buffer.length;
-        file.originalname = file.originalname.replace(/\.(jpe?g|png)$/i, '') + '.pdf';
-        photos.add(index);
-      }
-      const name = file.originalname;
-      if (!isPdf(file.buffer)) {
-        items.push({ index, name, skip: 'rejected', reason: 'Not a PDF file or a photo' });
-        continue;
-      }
-      const hash = fileHash(file.buffer);
-      if (seen.has(hash)) {
-        items.push({ index, name, skip: 'same', reason: 'The same PDF is in this upload twice' });
-        continue;
-      }
-      seen.add(hash);
-      const text = await extractText(file.buffer);
-      let type = detectType(name, text);
-      if (photos.has(index) && !OPTIONAL_UPLOADS[type]) type = null; // a photo is never a portal document
-      items.push({ index, name, file, text, type, first: !OPTIONAL_UPLOADS[type] && hasCustomerMobile(name, text, customers) });
+// ---------- a folder on this PC (for example the pendrive with the insurance policies) ----------
+const SKIP_DIRS = /^(\$|\.|system volume information$)/i;
+const MAX_SCAN = 5000;
+const MAX_SCAN_FILE = 40 * 1024 * 1024;
+
+function scanRoot(req, res) {
+  if (config.hosted) {
+    res.status(400).json({ error: 'Folder scan only works when the app runs on your own PC' });
+    return null;
+  }
+  const folder = String(req.body?.folder || '').trim().replace(/^["']|["']$/g, '');
+  if (!folder) {
+    res.status(400).json({ error: 'Type the folder, for example E:\\Policies' });
+    return null;
+  }
+  try {
+    if (!fs.statSync(folder).isDirectory()) throw new Error('not a folder');
+  } catch {
+    res.status(400).json({ error: `The folder "${folder}" was not found on this PC. Check the path, and that the pendrive is plugged in.` });
+    return null;
+  }
+  return path.resolve(folder);
+}
+
+/** Every PDF under a folder, folders inside folders included, as paths relative to it. */
+function walkPdfs(root) {
+  const out = [];
+  const walk = (dir, rel) => {
+    let entries = [];
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
     }
-    items.sort((a, b) => Number(!!b.first) - Number(!!a.first) || a.index - b.index);
+    entries.sort((a, b) => a.name.localeCompare(b.name));
+    for (const e of entries) {
+      if (out.length >= MAX_SCAN) return;
+      if (SKIP_DIRS.test(e.name)) continue;
+      const r = rel ? `${rel}\\${e.name}` : e.name;
+      if (e.isDirectory()) walk(path.join(dir, e.name), r);
+      else if (/\.pdf$/i.test(e.name)) out.push(r);
+    }
+  };
+  walk(root, '');
+  return out;
+}
 
+api.post(
+  '/uploads/scan/list',
+  wrap(async (req, res) => {
+    const root = scanRoot(req, res);
+    if (!root) return;
+    const files = walkPdfs(root);
+    // A month of invoices is one PDF with hundreds of pages: it is read ten pages at a time, so no single request is long
+    // and an interrupted run simply carries on (what is filed is "already there" next time).
+    let chunks;
+    if (req.body?.kind === 'bill') {
+      chunks = [];
+      for (const rel of files) {
+        const { pages } = await pageTexts(fs.readFileSync(path.join(root, rel)), 0);
+        for (let from = 1; from <= Math.max(pages, 1); from += 10) chunks.push({ file: rel, from, to: Math.min(from + 9, pages) });
+      }
+    }
+    res.json({ folder: root, count: files.length, files, chunks, capped: files.length >= MAX_SCAN });
+  })
+);
+
+// A few of the listed files at a time, so a big pendrive does not run into one very long request.
+api.post(
+  '/uploads/scan/run',
+  wrap(async (req, res) => {
+    const root = scanRoot(req, res);
+    if (!root) return;
+    const files = [];
     const results = [];
-    const touched = new Map();
-    for (const it of items) {
-      const { index, name, file, type, text } = it;
-      if (it.skip) {
-        results.push({ index, name, result: it.skip, reason: it.reason });
-        continue;
+    for (const ch of (Array.isArray(req.body?.chunks) ? req.body.chunks : []).slice(0, 3)) {
+      const rel = String(ch?.file || '');
+      const full = path.resolve(root, rel);
+      if (!full.toLowerCase().startsWith(root.toLowerCase() + path.sep) || !/\.pdf$/i.test(full)) continue;
+      try {
+        const part = await cutPages(fs.readFileSync(full), Number(ch.from) || 1, Number(ch.to) || 1);
+        files.push({ originalname: rel, buffer: part, size: part.length, pageOffset: (Number(ch.from) || 1) - 1 });
+      } catch (err) {
+        results.push({ index: 9e6 + results.length, name: rel, result: 'rejected', reason: `Could not be read: ${err.message}` });
       }
-      const placed = await placePdf({ name, buffer: file.buffer, text, type }, customers);
-      if (placed.result === 'pending') {
-        const storedName = `${crypto.randomUUID()}.pdf`;
-        await storage.put(pendingKey(storedName), file.buffer, 'w');
-        await Pending.create({ originalName: name, storedName, size: file.size, detectedType: type || '', applicationNumber: placed.appNo, candidates: placed.candidates.map((c) => c._id), reason: placed.reason });
-        results.push({ index, name, result: 'pending', type, reason: placed.reason });
-        continue;
+    }
+    for (const rel of (Array.isArray(req.body?.files) ? req.body.files : []).slice(0, 20)) {
+      const full = path.resolve(root, String(rel));
+      // only PDFs inside the chosen folder
+      if (!full.toLowerCase().startsWith(root.toLowerCase() + path.sep) || !/\.pdf$/i.test(full)) continue;
+      try {
+        if (fs.statSync(full).size > MAX_SCAN_FILE) {
+          results.push({ index: 9e6 + results.length, name: String(rel), result: 'rejected', reason: 'This PDF is larger than 40 MB' });
+          continue;
+        }
+        const buffer = fs.readFileSync(full);
+        files.push({ originalname: String(rel), buffer, size: buffer.length });
+      } catch (err) {
+        results.push({ index: 9e6 + results.length, name: String(rel), result: 'rejected', reason: `Could not be read: ${err.message}` });
       }
-      if (placed.result === 'saved') await recordSaved(placed, { originalName: name, size: file.size }, text);
-      if (UPLOAD_TYPES[type]) touched.set(String(placed.customer._id), placed.customer);
-      results.push({ index, name, result: placed.result, type, customer: brief(placed.customer), how: placed.how, note: placed.note || '' });
     }
-
-    // Anything that was waiting (from this upload or an earlier one) and can now be placed.
-    const alsoFiled = await resolvePending(customers);
-    for (const f of alsoFiled) {
-      const c = customers.find((x) => String(x._id) === f.customer.id);
-      if (c && UPLOAD_TYPES[f.type]) touched.set(f.customer.id, c);
-    }
-    const done = new Map(alsoFiled.map((f) => [f.name, f]));
-
-    res.json({
-      results: results.sort((a, b) => a.index - b.index).map((r) => (r.result === 'pending' && done.has(r.name) ? { ...r, ...done.get(r.name), reason: '' } : r)),
-      alsoFiled: alsoFiled.filter((f) => !results.some((r) => r.name === f.name)),
-      // For every customer this upload touched: which of the three documents they now have.
-      customers: [...touched.values()].map((c) => ({ ...brief(c), has: Object.fromEntries(Object.keys(UPLOAD_TYPES).map((t) => [t, !!c.uploads?.[t]])) })),
-    });
+    const customers = await customersForMatching();
+    const kind = OPTIONAL_UPLOADS[req.body?.kind] ? req.body.kind : '';
+    const items = await readItems(files, customers, new Set(), kind);
+    const dry = req.body?.dry === true; // "check only": nothing is saved
+    const placed = await placeItems(items, customers, dry, true);
+    const out = await finishBatch([...placed.results, ...results], placed.touched, customers, dry);
+    res.json({ ...out, dry });
   })
 );
 
 api.get(
   '/pending',
   wrap(async (req, res) => {
-    const pending = await Pending.find().sort({ createdAt: 1 }).populate('candidates', 'name village mobile sheet').lean();
+    const pending = await Pending.find().sort({ createdAt: 1 }).populate('candidates', 'name village taluka mobile sheet kw panelRaw excelRow englishName').lean();
     res.json({ pending });
   })
 );
@@ -925,8 +1287,10 @@ api.post(
     if (!ALL_UPLOADS[type]) return res.status(400).json({ error: 'Choose which document this is' });
     const c = mongoose.isValidObjectId(customerId) ? await Customer.findById(customerId).lean() : null;
     if (!c) return res.status(400).json({ error: 'Choose the customer' });
-    const buffer = await storage.get(pendingKey(p.storedName), 'w');
+    let buffer = await storage.get(pendingKey(p.storedName), 'w');
     if (!buffer) return res.status(404).json({ error: 'This PDF could not be found. Upload it again.' });
+    if (type === 'insurance') buffer = (await policyFrontPage(buffer)).buffer;
+    if (type === 'bill') buffer = (await billFirstPage(buffer)).buffer;
     await saveUpload(c._id, type, buffer);
     await Customer.updateOne({ _id: c._id }, { $set: { [`uploads.${type}`]: { originalName: p.originalName, size: p.size, uploadedAt: new Date(), hash: fileHash(buffer) } } });
     const gotName = type === 'fl' && (await learnName({ _id: c._id, typedName: c.englishName }, await extractText(buffer)));

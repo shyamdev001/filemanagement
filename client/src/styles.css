@@ -160,7 +160,7 @@ select.needs { border-color: #e2a39c; background: var(--no-bg); }
 .panel-body { padding: 20px; }
 
 /* summary tiles double as filters */
-.summary { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); overflow: hidden; }
+.summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); overflow: hidden; }
 .summary button {
   border: 0; background: transparent; text-align: left; padding: 16px 20px; cursor: pointer; font: inherit; color: inherit;
   display: grid; gap: 2px; position: relative; transition: background-color 150ms;
@@ -375,3 +375,43 @@ table.grid { width: 100%; border-collapse: collapse; font-size: 14.5px; }
 .side-me svg { flex: none; color: var(--side-muted); }
 .side-me b { display: block; font-weight: 500; font-size: 13.5px; line-height: 1.25; }
 .side-me small { display: block; font-size: 12px; color: var(--side-muted); }
+
+/* ---------- details form, notes ---------- */
+.details-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 14px 18px; }
+.details-grid .wide { grid-column: 1 / -1; }
+.edited-tag { margin-left: 8px; font-style: normal; font-size: 11.5px; color: var(--warn); background: var(--warn-bg); padding: 1px 7px; border-radius: 8px; }
+.notes { display: grid; gap: 12px; }
+.notes .why { background: var(--warn-bg); color: var(--text); border-radius: 8px; padding: 10px 12px; font-size: 14px; }
+.notes .why ul { margin: 6px 0 0; padding-left: 18px; display: grid; gap: 3px; }
+.note { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; display: grid; gap: 4px; }
+.note p { margin: 0; white-space: pre-wrap; }
+.note-by { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 12.5px; color: var(--text-3); }
+.notes textarea { width: 100%; resize: vertical; font: inherit; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.chip { border: 1px solid var(--line); background: #fff; border-radius: 14px; padding: 3px 10px; font: inherit; font-size: 12.5px; color: var(--text-2); cursor: pointer; }
+.chip:hover { border-color: var(--accent); color: var(--accent); }
+.note-dot { color: var(--text-3); vertical-align: -2px; margin-left: 6px; }
+
+.sent-mark { color: var(--ok); display: inline-flex; }
+
+/* Sent tick in the customer list */
+.tick { width: 24px; height: 24px; border-radius: 6px; border: 2px solid var(--accent); background: #fff; color: var(--accent); display: inline-grid; place-items: center; cursor: pointer; padding: 0; font: inherit; }
+.tick:hover { background: var(--accent-soft); }
+.tick.on { background: var(--ok); border-color: var(--ok); color: #fff; }
+.tick.off { border: 2px dashed #d5d9e0; cursor: not-allowed; background: transparent; }
+
+/* ---------- Ask ---------- */
+.ask .ask-chat { display: grid; gap: 18px; margin-bottom: 96px; }
+.ask-turn { display: grid; gap: 10px; }
+.ask-q { justify-self: end; max-width: min(640px, 90%); background: var(--accent-soft); color: var(--text); border-radius: 14px 14px 4px 14px; padding: 9px 14px; font-size: 14.5px; }
+.ask-head { display: flex; align-items: center; gap: 10px 14px; flex-wrap: wrap; font-size: 15.5px; }
+.ask-note { margin: 8px 0 0; font-size: 13.5px; }
+.chip.static { cursor: default; background: var(--surface-2); }
+.chip.static:hover { border-color: var(--line); color: var(--text-2); }
+.ask-box { position: sticky; bottom: 0; display: flex; gap: 10px; padding: 14px 0 18px; background: linear-gradient(to top, var(--bg, #f6f7f9) 70%, transparent); }
+.ask-box input { flex: 1; min-width: 0; height: 44px; padding: 0 14px; font-size: 15px; border: 1px solid var(--line); border-radius: 10px; background: #fff; }
+.ask-box .btn { height: 44px; }
+
+/* ---------- advanced filters ---------- */
+.filter-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 12px 16px; }
+.filters select { width: 100%; }

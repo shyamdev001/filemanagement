@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Link, NavLink, Route, Routes } from 'react-router-dom';
-import { ClipboardPaste, FileSpreadsheet, FileUp, FolderCog, Globe, LogOut, Printer, UserCog, UserRound, Users } from 'lucide-react';
+import { ClipboardPaste, FileSpreadsheet, FileUp, FolderCog, Globe, LogOut, MessageCircle, Printer, UserCog, UserRound, Users } from 'lucide-react';
 import Print from './pages/Print.jsx';
 import PortalHelper from './pages/PortalHelper.jsx';
 import { api } from './api.js';
@@ -14,9 +14,12 @@ import Settings from './pages/Settings.jsx';
 import Login from './pages/Login.jsx';
 import Staff from './pages/Staff.jsx';
 import Account from './pages/Account.jsx';
+import NewCustomer from './pages/CustomerForm.jsx';
+import Ask from './pages/Ask.jsx';
 
 const NAV = [
   { to: '/', end: true, icon: Users, en: 'Customers', gu: 'ગ્રાહકો' },
+  { to: '/ask', icon: MessageCircle, en: 'Ask', gu: 'પૂછો' },
   { to: '/upload', icon: FileUp, en: 'Upload PDFs', gu: 'PDF અપલોડ' },
   { to: '/portal', icon: Globe, en: 'Portal helper', gu: 'પોર્ટલ હેલ્પર' },
   { to: '/print', icon: Printer, en: 'Print files', gu: 'ફાઈલ પ્રિન્ટ' },
@@ -125,8 +128,10 @@ export default function App() {
       <main className="main">
         {error && <div className="page" style={{ marginBottom: 20 }}><Notice>{error}</Notice></div>}
         <Routes>
-          <Route path="/" element={<Customers customers={customers} />} />
+          <Route path="/" element={<Customers customers={customers} onChanged={changed} />} />
+          <Route path="/customer/new" element={<NewCustomer onChanged={reload} />} />
           <Route path="/customer/:id" element={<CustomerDetail customers={customers} onChanged={changed} />} />
+          <Route path="/ask" element={<Ask />} />
           <Route path="/upload" element={<BulkUpload customers={customers} onChanged={reload} />} />
           <Route path="/portal" element={<PortalHelper />} />
           <Route path="/print" element={<Print customers={customers} onChanged={reload} />} />

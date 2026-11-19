@@ -5,11 +5,12 @@
 import crypto from 'node:crypto';
 import express from 'express';
 import multer from 'multer';
+import mongoose from 'mongoose';
 import { Customer, getSetting, setSetting } from './models.js';
 import { loadDatasheetConfig } from './lib/datasheets.js';
 import { parseInverter } from './lib/parsers.js';
 import { englishName } from './lib/transliterate.js';
-import { nameKeys, namesAgree } from './lib/names.js';
+import { nameKeys, namesAgree, plainName, sharedWords } from './lib/names.js';
 import { UPLOAD_TYPES, fileHash, isPdf, saveUpload } from './lib/uploads.js';
 
 export const PORTAL_ORIGIN = 'https://vendor.pmsuryaghar.gov.in';
@@ -51,17 +52,38 @@ portal.use(
   })
 );
 
-const FIELDS = { name: 1, village: 1, sheet: 1, mobile: 1, mobiles: 1, kw: 1, englishName: 1, applicationNumber: 1, inverterRaw: 1, inverterSerial: 1, uploads: 1, portal: 1 };
+const FIELDS = { name: 1, village: 1, sheet: 1, mobile: 1, mobiles: 1, kw: 1, englishName: 1, applicationNumber: 1, inverterRaw: 1, inverterSerial: 1, uploads: 1, portal: 1, nameAliases: 1 };
 async function loadCustomers() {
   const customers = await Customer.find({}, FIELDS).lean();
   // ownKeys: the customer's name as it stands in the Excel (Gujarati), the one thing we can trust.
   for (const c of customers) c.ownKeys = nameKeys(englishName(c.name));
   return customers;
 }
+/** The portal name is this customer's: it agrees with the Excel name, or a person confirmed it. */
+const agrees = (name, c) => namesAgree(name, c.ownKeys) || (c.nameAliases || []).includes(plainName(name));
 const digits = (s) => String(s || '').replace(/\D/g, '').slice(-10);
+/** Two mobile numbers that differ by one wrong, missing, extra or swapped digit: most likely one number with a typo. */
+function near(a, b) {
+  if (!a || !b) return false;
+  if (a === b) return true;
+  if (a.length === b.length) {
+    let d = 0;
+    for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) d++;
+    if (d <= 1) return true;
+    for (let i = 0; i < a.length - 1; i++) {
+      if (a[i] === b[i + 1] && a[i + 1] === b[i] && a.slice(0, i) === b.slice(0, i) && a.slice(i + 2) === b.slice(i + 2)) return true;
+    }
+    return false;
+  }
+  if (Math.abs(a.length - b.length) !== 1) return false;
+  const [s, l] = a.length < b.length ? [a, b] : [b, a];
+  for (let i = 0; i < l.length; i++) if (l.slice(0, i) + l.slice(i + 1) === s) return true;
+  return false;
+}
 const appNo = (s) => String(s || '').toUpperCase().replace(/\s+/g, '');
 const has = (c) => Object.fromEntries(Object.keys(UPLOAD_TYPES).map((t) => [t, !!c.uploads?.[t]]));
-const brief = (c) => ({ id: String(c._id), name: c.name, english: c.englishName || englishName(c.name), village: c.village, has: has(c) });
+const sameName = (c, customers) => (customers || []).filter((o) => String(o._id) !== String(c._id) && String(o.name || '').replace(/\s+/g, ' ').trim() === String(c.name || '').replace(/\s+/g, ' ').trim()).length;
+const brief = (c, customers) => ({ id: String(c._id), name: c.name, english: c.englishName || englishName(c.name), village: c.village, kw: c.kw, sameName: customers ? sameName(c, customers) : 0, has: has(c) });
 
 /**
  * The customer an application belongs to.
@@ -73,15 +95,24 @@ function whose({ applicationNumber, mobile, name }, customers) {
   const no = appNo(applicationNumber);
   const byNo = no ? customers.filter((c) => c.applicationNumber === no) : [];
   if (byNo.length === 1) {
-    if (namesAgree(name, byNo[0].ownKeys)) return { c: byNo[0], how: 'application number and name' };
+    if (agrees(name, byNo[0])) return { c: byNo[0], how: 'application number and name' };
     return { c: null, mismatch: byNo[0] };
   }
   const m = digits(mobile);
   const hits = m.length === 10 ? customers.filter((c) => (c.mobiles || []).includes(m)) : [];
-  const agreeing = hits.filter((c) => namesAgree(name, c.ownKeys));
+  const agreeing = hits.filter((c) => agrees(name, c));
   if (agreeing.length === 1) return { c: agreeing[0], how: 'mobile number and name' };
   if (agreeing.length > 1) return { c: null, several: true };
-  return { c: null, mismatch: hits[0] || null };
+  // The customers whose Excel name agrees and who have no application yet.
+  const byName = customers.filter((c) => !c.applicationNumber && agrees(name, c));
+  // The name agrees and the Excel number is the portal's number with one digit wrong (a typo on either side):
+  // this is the same person. Only when exactly one such customer exists; the difference is shown to staff.
+  const nearNumber = m.length === 10 ? byName.filter((c) => (c.mobiles || []).some((x) => near(x, m))) : [];
+  if (nearNumber.length === 1) {
+    return { c: nearNumber[0], how: 'name and a mobile number one digit different', mobileDiffers: { portal: m, excel: (nearNumber[0].mobiles || []).find((x) => near(x, m)) } };
+  }
+  // Otherwise nothing is chosen by itself: the mobile's owner (if any) and the customers with this name are offered.
+  return { c: null, mismatch: hits[0] || null, byName };
 }
 
 portal.get('/ping', wrap(async (req, res) => res.json({ ok: true, customers: await Customer.estimatedDocumentCount() })));
@@ -103,7 +134,7 @@ portal.post(
     // 1. Undo anything saved earlier from a row whose name is not this customer's name.
     for (const c of customers) {
       const r = c.applicationNumber && rowByNo.get(c.applicationNumber);
-      if (!r || namesAgree(r.consumerName, c.ownKeys)) continue;
+      if (!r || agrees(r.consumerName, c)) continue;
       const o = op(c);
       o.unset.applicationNumber = 1;
       o.unset.portal = 1;
@@ -119,9 +150,19 @@ portal.post(
     const mine = new Map();
     for (const r of rows) {
       const hits = byMobile.get(digits(r.mobileNo)) || [];
-      const agreeing = hits.filter((c) => namesAgree(r.consumerName, c.ownKeys));
+      const agreeing = hits.filter((c) => agrees(r.consumerName, c));
       if (hits.length && !agreeing.length) out.nameDiffers++;
       if (agreeing.length === 1) mine.set(agreeing[0], [...(mine.get(agreeing[0]) || []), r]);
+      else if (!agreeing.length) {
+        // No exact number, but exactly one customer without an application whose name agrees and whose Excel number is
+        // this one with a single wrong digit (a typo on the portal or in the Excel): the same person.
+        const m = digits(r.mobileNo);
+        const close = m.length === 10 ? customers.filter((c) => !c.applicationNumber && (c.mobiles || []).some((x) => near(x, m)) && agrees(r.consumerName, c)) : [];
+        if (close.length === 1) {
+          mine.set(close[0], [...(mine.get(close[0]) || []), r]);
+          out.nearMobile = (out.nearMobile || 0) + 1;
+        }
+      }
     }
     const taken = new Map(customers.filter((c) => c.applicationNumber).map((c) => [c.applicationNumber, String(c._id)]));
     for (const [c, list] of mine) {
@@ -159,6 +200,7 @@ portal.post(
           consumerNo: String(r.consumerNo || ''),
           stage: String(r.stageName || ''),
           status: String(r.statusName || ''),
+          mobile: digits(r.mobileNo),
         };
         delete o.unset.portal;
       }
@@ -183,14 +225,29 @@ portal.post(
   wrap(async (req, res) => {
     const d = req.body || {};
     const customers = await loadCustomers();
-    const { c, several, mismatch } = whose({ applicationNumber: d.applicationNumber, mobile: d.mobile, name: d.name }, customers);
+    const { c, several, mismatch, byName, mobileDiffers } = whose({ applicationNumber: d.applicationNumber, mobile: d.mobile, name: d.name }, customers);
     if (!c) {
       const reason = several
         ? 'Several customers in your Excel have this mobile number and this name'
-        : mismatch
-          ? `Not matched: this application is in the name of ${d.name}, but its mobile number is ${mismatch.name}'s in your Excel`
-          : 'This application is not in the app: its mobile number is not in your Excel';
-      return res.json({ found: false, reason });
+        : mismatch && byName?.length
+          ? `The mobile number on this application is ${mismatch.name}'s in your Excel, but the NAME matches the customer(s) below. Which one is it?`
+          : mismatch
+            ? `Not matched: this application is in the name of ${d.name}, but its mobile number is ${mismatch.name}'s in your Excel`
+            : byName?.length
+              ? `This application's mobile number (${digits(d.mobile)}) is not in your Excel, but the name is. Is it one of these?`
+              : 'This application is not in the app: its mobile number and name are not in your Excel';
+      // The person the number points at, so staff can say "same person" with one click. Not offered again when
+      // that person is already among the name matches.
+      const shared = mismatch ? sharedWords(d.name, mismatch.ownKeys) : 0;
+      const candidate = mismatch && !mismatch.applicationNumber && !(byName || []).some((x) => String(x._id) === String(mismatch._id)) ? { ...brief(mismatch), shared, words: nameKeys(d.name).length } : null;
+      // Name matches first, those whose Excel number is closest to the portal's number leading.
+      const m = digits(d.mobile);
+      const others = (byName || [])
+        .slice()
+        .sort((a, b) => Number((b.mobiles || []).some((x) => near(x, m))) - Number((a.mobiles || []).some((x) => near(x, m))))
+        .slice(0, 5)
+        .map((x) => ({ ...brief(x, customers), mobile: x.mobile, numberNear: (x.mobiles || []).some((y) => near(y, m)) }));
+      return res.json({ found: false, reason, candidate, others, portalMobile: m });
     }
 
     const set = {};
@@ -217,10 +274,39 @@ portal.post(
 
     const labels = new Set((d.documents || []).map((x) => x.type));
     const available = { fl: labels.has('Feasibility Document'), dcr: labels.has('DCR Declaration'), agreement: labels.has('Vendor And Customer Agreement') };
-    set.portal = { ...(c.portal || {}), available, checkedAt: new Date() };
+    // The mobile number the portal has for this application (kept to show when it is not the Excel's).
+    set.portal = { ...(c.portal || {}), available, checkedAt: new Date(), mobile: digits(d.mobile) };
+    let matchNote = '';
+    if (mobileDiffers) {
+      matchNote = `Found by the name. The portal has mobile ${mobileDiffers.portal}, your Excel has ${mobileDiffers.excel}: one digit differs. Check which is right.`;
+    } else if (digits(d.mobile) && !(c.mobiles || []).includes(digits(d.mobile))) {
+      matchNote = `The portal has mobile ${digits(d.mobile)}, which is not the number in your Excel (${(c.mobiles || []).join(', ') || 'none'}).`;
+    }
     if (Object.keys(set).length) await Customer.updateOne({ _id: c._id }, { $set: set });
     Object.assign(c, set);
-    res.json({ found: true, customer: brief(c), available, learned: Object.keys(set).filter((k) => k !== 'portal'), serial, portalSerial: serials[0] || '', appSerial: c.inverterSerial || '' });
+    res.json({ found: true, matchNote, customer: brief(c, customers), available, learned: Object.keys(set).filter((k) => k !== 'portal'), serial, portalSerial: serials[0] || '', appSerial: c.inverterSerial || '' });
+  })
+);
+
+// Staff say the application whose name differs is this customer after all (a surname spelled
+// differently on the portal, a married name …). The portal spelling is remembered for them, so the
+// helper, the list import and Upload PDFs all accept it from now on.
+portal.post(
+  '/confirm',
+  wrap(async (req, res) => {
+    const { customerId, name, applicationNumber } = req.body || {};
+    const portalName = plainName(name);
+    if (!portalName || !mongoose.isValidObjectId(customerId)) return res.status(400).json({ error: 'Missing customer or name' });
+    const c = await Customer.findById(customerId, FIELDS).lean();
+    if (!c) return res.status(404).json({ error: 'Customer not found' });
+    const no = appNo(applicationNumber);
+    if (no && c.applicationNumber && c.applicationNumber !== no) return res.status(409).json({ error: `${c.name} already has application ${c.applicationNumber}` });
+    if (no && (await Customer.exists({ applicationNumber: no, _id: { $ne: c._id } }))) return res.status(409).json({ error: `Application ${no} is already saved for another customer` });
+    const set = {};
+    if (no && !c.applicationNumber) set.applicationNumber = no;
+    if (!c.englishName) set.englishName = portalName;
+    await Customer.updateOne({ _id: c._id }, { $addToSet: { nameAliases: portalName }, ...(Object.keys(set).length ? { $set: set } : {}) });
+    res.json({ ok: true });
   })
 );
 
@@ -238,14 +324,14 @@ portal.post(
 
     const hash = fileHash(req.file.buffer);
     const have = c.uploads?.[type];
-    if (have?.hash === hash) return res.json({ result: 'same', customer: brief(c) });
-    if (have && replace !== 'yes') return res.json({ result: 'different', customer: brief(c) });
+    if (have?.hash === hash) return res.json({ result: 'same', customer: brief(c, customers) });
+    if (have && replace !== 'yes') return res.json({ result: 'different', customer: brief(c, customers) });
 
     await saveUpload(c._id, type, req.file.buffer);
     const meta = { originalName: Buffer.from(req.file.originalname, 'latin1').toString('utf8'), size: req.file.size, uploadedAt: new Date(), hash, from: 'portal' };
     await Customer.updateOne({ _id: c._id }, { $set: { [`uploads.${type}`]: meta } });
     c.uploads = { ...(c.uploads || {}), [type]: meta };
-    res.json({ result: 'saved', customer: brief(c) });
+    res.json({ result: 'saved', customer: brief(c, customers) });
   })
 );
 

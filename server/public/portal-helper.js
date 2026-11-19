@@ -54,9 +54,30 @@
       '<b>☀ Solar Files helper <span style="font-weight:400;opacity:.7;font-size:12px">· drag to move</span></b><span data-act="hide" style="cursor:pointer;padding:0 6px;font-size:18px">–</span></div><div style="padding:12px 14px;display:grid;gap:10px">';
     if (state.list) h += '<div style="color:#4d586b;font-size:13px">Application list read: <b>' + state.list.matched + '</b> of your customers found, ' + state.list.numbers + ' application numbers and ' + state.list.names + ' names saved.</div>';
     if (!state.current) h += '<div>Open an application with <b>Action → View Application</b>. I will take it from there.</div>';
-    else if (!c) h += '<div><b>' + esc(state.current.name) + '</b><div style="color:#b42318;font-size:13px">' + esc(state.notFound || 'Checking…') + '</div></div>';
+    else if (!c) {
+      h += '<div><b>' + esc(state.current.name) + '</b><div style="color:#b42318;font-size:13px">' + esc(state.notFound || 'Checking…') + '</div></div>';
+      (state.others || []).forEach(function (o) {
+        h += '<div style="border:1px solid #f0c36d;background:#fff8e6;border-radius:8px;padding:10px;display:grid;gap:6px">' +
+          '<div><b lang="gu">' + esc(o.name) + '</b><div style="color:#667085;font-size:13px">' + esc(o.english) + (o.village ? ' · ' + esc(o.village) : '') + (o.kw ? ' · ' + esc(o.kw) + ' kW' : '') + (o.mobile ? ' · Excel mobile ' + esc(o.mobile) : '') + '</div></div>' +
+          (o.numberNear ? '<div style="font-size:12px;color:#8a4b08">The name agrees, and this Excel number is the number on the portal (' + esc(state.portalMobile || '') + ') with one digit different.</div>' : '') +
+          '<button data-act="link" data-id="' + esc(o.id) + '" style="' + button + 'background:#0f1b33;color:#fff">This is the one: link</button></div>';
+      });
+      if ((state.others || []).length) h += '<div style="font-size:12px;color:#667085">Compare the village and the system size (kW) with the portal before you link.</div>';
+      var k = state.candidate;
+      if (k) {
+        h += '<div style="border:1px solid #f0c36d;background:#fff8e6;border-radius:8px;padding:10px;display:grid;gap:6px">' +
+          '<div style="font-size:13px;color:#4d586b">Same person? In your Excel this mobile number belongs to:</div>' +
+          '<div><b lang="gu">' + esc(k.name) + '</b><div style="color:#667085;font-size:13px">' + esc(k.english) + (k.village ? ' · ' + esc(k.village) : '') + '</div></div>' +
+          (k.shared >= 2 ? '<div style="font-size:13px;color:#8a4b08">' + k.shared + ' of the ' + k.words + ' name words agree; only part of the name differs.</div>' : '') +
+          '<div style="font-size:12px;color:#667085">Check the father\'s name, village and system size on the portal before you link.</div>' +
+          '<button data-act="link" style="' + button + 'background:#0f1b33;color:#fff">Yes, same person: link</button></div>';
+      }
+    }
     else {
-      h += '<div><b lang="gu">' + esc(c.name) + '</b><div style="color:#667085;font-size:13px">' + esc(c.english) + (c.village ? ' · ' + esc(c.village) : '') + '</div></div>';
+      h += '<div><b lang="gu">' + esc(c.name) + '</b><div style="color:#667085;font-size:13px">' + esc(c.english) + (c.village ? ' · ' + esc(c.village) : '') + (c.kw ? ' · ' + esc(c.kw) + ' kW' : '') + '</div>' +
+        '<a href="' + esc(APP.url + '/customer/' + c.id) + '" target="_blank" rel="noopener" style="color:#b9520a;font-size:13px">Open this customer in Solar Files ↗</a>' +
+        (state.matchNote ? '<div style="font-size:12px;color:#8a4b08;background:#fff5dd;border-radius:6px;padding:5px 8px;margin-top:4px">' + esc(state.matchNote) + '</div>' : '') +
+        (c.sameName ? '<div style="font-size:12px;color:#8a4b08">' + c.sameName + ' other customer' + (c.sameName > 1 ? 's have' : ' has') + ' the same name. Open with the link above to be sure.</div>' : '') + '</div>';
       h += '<div style="display:flex;gap:14px">' + ['fl', 'dcr', 'agreement'].map(function (t) { return '<span>' + dot(c.has[t]) + ' ' + LABEL[t] + '</span>'; }).join('') + '</div>';
       if (state.serialNote) h += '<div style="font-size:13px;color:#4d586b">' + esc(state.serialNote) + '</div>';
       var missing = ['fl', 'dcr', 'agreement'].filter(function (t) { return !c.has[t]; });
@@ -95,6 +116,7 @@
     if (t.dataset.act === 'grab') grab();
     if (t.dataset.act === 'queue') loadQueue();
     if (t.dataset.act === 'more') { state.more = !state.more; draw(); }
+    if (t.dataset.act === 'link') link(t.dataset.id);
   });
   // ---------- drag the panel by its dark title bar; the place is remembered ----------
   function place(left, top) {
@@ -159,12 +181,34 @@
     };
     state.customer = null;
     state.notFound = '';
+    state.candidate = null;
+    state.others = null;
     state.available = null;
     state.serialNote = '';
     state.log = [];
     draw();
+    checkApplication();
+  }
+  // A person says the application is this customer's although the names differ: remember it, then go on.
+  function link(id) {
+    var k = id ? (state.others || []).filter(function (o) { return o.id === id; })[0] : state.candidate;
+    var cur = state.current;
+    if (!k || !cur) return;
+    if (!confirm('Link ' + cur.name + ' (' + cur.applicationNumber + ') to ' + k.name + '?\n\nOnly if you are sure it is the same person.')) return;
+    post('/confirm', { customerId: k.id, name: cur.name, applicationNumber: cur.applicationNumber }).then(function (r) {
+      if (r.error) return say(r.error, true);
+      say('Linked. ' + cur.name + ' is now known as ' + k.name + '.');
+      state.candidate = null;
+      state.others = null;
+      state.notFound = '';
+      checkApplication();
+    }).catch(function (e) { say('Not linked: ' + e.message, true); });
+  }
+  function checkApplication() {
     post('/application', state.current).then(function (r) {
-      if (!r.found) { state.notFound = r.reason; return draw(); }
+      state.matchNote = r.matchNote || '';
+      state.portalMobile = r.portalMobile || '';
+      if (!r.found) { state.notFound = r.reason; state.candidate = r.candidate || null; state.others = r.others || null; return draw(); }
       state.customer = r.customer;
       state.available = r.available || null;
       loadQueue(); // a customer with nothing to fetch yet drops out of the list
